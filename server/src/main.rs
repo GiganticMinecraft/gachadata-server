@@ -1,3 +1,6 @@
+use anyhow::anyhow;
+use crate::config::Config;
+
 mod config {
 
     pub struct HttpPort {
@@ -33,5 +36,10 @@ mod config {
 
 #[tokio::main]
 async fn main() {
-    println!("Hello, world!");
+    let config = Config::from_environment()
+        .map_err(anyhow!("Failed to load config from environment."))?;
+
+    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], config.http_port.port));
+
+    axum::Server::bind(&addr).await?
 }
