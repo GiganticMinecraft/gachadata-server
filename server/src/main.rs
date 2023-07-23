@@ -17,6 +17,7 @@ mod infra_repository_impls {
     use std::process::Command;
     use std::time::{Duration, SystemTime};
     use tokio::fs::File;
+    use tokio::io::AsyncWriteExt;
     use crate::config::MySQL;
     use crate::domain::{GachadataDump, GachaDataRepository};
 
@@ -26,7 +27,7 @@ mod infra_repository_impls {
     }
 
     impl MySQLDumpConnection {
-        pub async fn run_gachadata_dump(&self) {
+        pub async fn run_gachadata_dump(&self) -> anyhow::Result<()> {
             let MySQL {
                 address,
                 port,
@@ -34,10 +35,15 @@ mod infra_repository_impls {
                 password
             } = &self.connection_information;
 
-            Command::new("mysqldump")
-                .args(vec!["-u", user, format!("-p{}", password).as_str(), "-h", address, "-P", port.to_string().as_str(), "-t", "seichiassist", "gachadata", ">", "gachadata.sql"])
-                .spawn()
-                .expect("Failed to run mysqldump.");
+            let output = Command::new("mysqldump")
+                .args(vec!["-h", address, "--port", port.to_string().as_str(), "-u", user, format!("-p{}", password).as_str(), "seichiassist", "gachadata"])
+                .output()?;
+
+            let mut file = File::create("./gachadata.sql").await?;
+
+            file.write_all(&output.stdout).await?;
+
+            Ok(())
         }
     }
 
@@ -57,7 +63,7 @@ mod infra_repository_impls {
             };
 
             if is_after_more_than_quarter_hour {
-                self.run_gachadata_dump().await
+                self.run_gachadata_dump().await?
             }
 
             Ok(GachadataDump(File::open("gachadata.sql").await?))
