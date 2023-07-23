@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.72"
+async-trait = "0.1.72"
 axum = "0.6.19"
 envy = "0.4.2"
 serde = "1.0.174"

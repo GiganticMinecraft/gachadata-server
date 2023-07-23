@@ -1,5 +1,17 @@
 use anyhow::anyhow;
-use crate::config::Config;
+
+mod domain {
+    use std::fmt::Debug;
+    use std::fs::File;
+
+    pub struct GachadataDump(pub File);
+
+    #[async_trait::async_trait]
+    pub trait GachaDataRepository: Debug + Sync + Send + 'static {
+        async fn get_gachadata(&self) -> anyhow::Result<GachadataDump>;
+    }
+
+}
 
 mod config {
 
@@ -36,8 +48,10 @@ mod config {
 
 #[tokio::main]
 async fn main() {
+    use crate::config::Config;
+
     let config = Config::from_environment()
-        .map_err(anyhow!("Failed to load config from environment."))?;
+        .map_err(anyhow!("Failed to load config from environment variables."))?;
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], config.http_port.port));
 
