@@ -4,11 +4,66 @@ mod domain {
     use std::fmt::Debug;
     use std::fs::File;
 
+    #[derive(Debug)]
     pub struct GachadataDump(pub File);
 
     #[async_trait::async_trait]
     pub trait GachaDataRepository: Debug + Sync + Send + 'static {
         async fn get_gachadata(&self) -> anyhow::Result<GachadataDump>;
+    }
+
+}
+
+mod infra_repository_impls {
+    use std::fs::File;
+    use std::ops::Sub;
+    use std::process::Command;
+    use std::time::{Duration, SystemTime};
+    use crate::config::MySQL;
+    use crate::domain::{GachadataDump, GachaDataRepository};
+
+    #[derive(Debug)]
+    pub struct MySQLDumpConnection {
+        pub connection_information: MySQL
+    }
+
+    impl MySQLDumpConnection {
+        pub async fn run_gachadata_dump(&self) {
+            let MySQL {
+                address,
+                port,
+                user,
+                password
+            } = self;
+
+            Command::new("mysqldump")
+                .args(vec!["-u", user, format!("-p{password}"), "-h", address, "-P", port, "-t", "seichiassist", "gachadata", ">", "gachadata.sql"])
+                .spawn()
+                .expect("Failed to run mysqldump.");
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl GachaDataRepository for MySQLDumpConnection {
+        async fn get_gachadata(&self) -> anyhow::Result<GachadataDump> {
+            let quarter_hour = Duration::from_secs(900);
+            let is_after_more_than_quarter_hour = match File::open("gachadata.sql") {
+                Ok(file) => {
+                    let last_modified = file.metadata()?.modified()?;
+
+                    let quarter_hour_from_now = SystemTime::now().sub(quarter_hour);
+
+                    quarter_hour_from_now < last_modified
+                },
+                Err(_) => true
+            };
+
+            if is_after_more_than_quarter_hour {
+                self.run_gachadata_dump()
+            }
+
+            Ok(GachadataDump(File::open("gachadata.sql")?))
+        }
     }
 
 }
