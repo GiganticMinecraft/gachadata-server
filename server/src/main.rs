@@ -1,29 +1,40 @@
+use std::sync::{Arc, Mutex};
+
 mod domain {
     use std::fmt::Debug;
-    use tokio::fs::File;
+    use std::time::SystemTime;
+    use bytes::Bytes;
 
-    #[derive(Debug)]
-    pub struct GachadataDump(pub File);
+    #[derive(Debug, Clone, Default)]
+    pub struct GachadataDump(pub Bytes);
+
+    #[derive(Debug, Clone, Default)]
+    pub struct GachadataDumpWithTime {
+        pub dump: GachadataDump,
+        pub dump_time: Option<SystemTime>
+    }
 
     #[async_trait::async_trait]
     pub trait GachaDataRepository: Debug + Sync + Send + 'static {
-        async fn get_gachadata(&self) -> anyhow::Result<GachadataDump>;
+        async fn update_gachadata(&self) -> anyhow::Result<()>;
     }
 
 }
 
 mod infra_repository_impls {
-    use std::ops::Sub;
+    use std::ops::{Deref, Sub};
     use std::process::Command;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, SystemTime};
-    use tokio::fs::File;
-    use tokio::io::AsyncWriteExt;
+    use anyhow::anyhow;
+    use bytes::Bytes;
     use crate::config::MySQL;
-    use crate::domain::{GachadataDump, GachaDataRepository};
+    use crate::domain::{GachadataDump, GachadataDumpWithTime, GachaDataRepository};
 
     #[derive(Debug, Clone)]
     pub struct MySQLDumpConnection {
-        pub connection_information: MySQL
+        pub connection_information: MySQL,
+        pub dump: Arc<Mutex<GachadataDumpWithTime>>
     }
 
     impl MySQLDumpConnection {
@@ -39,9 +50,14 @@ mod infra_repository_impls {
                 .args(vec!["-h", address, "--port", port.to_string().as_str(), "-u", user, format!("-p{}", password).as_str(), "seichiassist", "gachadata"])
                 .output()?;
 
-            let mut file = File::create("./gachadata.sql").await?;
-
-            file.write_all(&output.stdout).await?;
+            if let Ok(mut dump) = self.dump.lock() {
+                *dump = GachadataDumpWithTime {
+                    dump: GachadataDump(Bytes::from(output.stdout)),
+                    dump_time: Some(SystemTime::now())
+                }
+            } else {
+                return Err(anyhow!("Failed to lock gachadata dump."))
+            }
 
             Ok(())
         }
@@ -49,51 +65,60 @@ mod infra_repository_impls {
 
     #[async_trait::async_trait]
     impl GachaDataRepository for MySQLDumpConnection {
-        async fn get_gachadata(&self) -> anyhow::Result<GachadataDump> {
-            let quarter_hour = Duration::from_secs(900);
-            let is_after_more_than_quarter_hour = match File::open("gachadata.sql").await {
-                Ok(file) => {
-                    let last_modified = file.metadata().await?.modified()?;
+        async fn update_gachadata(&self) -> anyhow::Result<()> {
+            let is_after_more_than_quarter_hour = match self.dump.lock() {
+                Ok(dump) => {
+                    let quarter_hour = Duration::from_secs(900);
+                    let dump_time = dump.dump_time.ok_or(anyhow!("Failed to get last dump time."))?;
 
                     let quarter_hour_from_now = SystemTime::now().sub(quarter_hour);
 
-                    quarter_hour_from_now < last_modified
+                    quarter_hour_from_now < dump_time
                 },
-                Err(_) => true
+                _ => false
             };
 
             if is_after_more_than_quarter_hour {
                 self.run_gachadata_dump().await?
             }
 
-            Ok(GachadataDump(File::open("gachadata.sql").await?))
+            Ok(())
         }
     }
 
 }
 
 mod presentation {
-    use axum::body::StreamBody;
     use axum::extract::State;
     use axum::http::StatusCode;
-    use axum::response::IntoResponse;
-    use tokio_util::io::ReaderStream;
-    use crate::domain::GachaDataRepository;
+    use axum::response::{ErrorResponse, IntoResponse, Response, Result};
     use crate::infra_repository_impls::MySQLDumpConnection;
 
-    pub async fn get_gachadata_handler(State(repository): State<MySQLDumpConnection>) -> impl IntoResponse {
-        match repository.get_gachadata().await {
-            Ok(gachadata_dump) => {
-                let stream = ReaderStream::new(gachadata_dump.0);
-                let body = StreamBody::new(stream);
+    pub async fn get_gachadata_handler(State(repository): State<MySQLDumpConnection>) -> Result<impl IntoResponse> {
+        match repository.run_gachadata_dump().await {
+            Ok(_) => match repository.dump.lock() {
+                Ok(gachadata_dump) if !gachadata_dump.dump.0.is_empty() => {
 
-                (StatusCode::OK, body).into_response()
-            },
+                    Ok(Response::builder()
+                        .status(StatusCode::OK)
+                        .header("Content-Disposition", "attachment; filename=gachadata.sql")
+                        .body(gachadata_dump.dump.0.to_owned().into_response())
+                        .unwrap())
+                },
+                Ok(_) => {
+                    Err(ErrorResponse::from((StatusCode::INTERNAL_SERVER_ERROR, "Failed to get gachadata.sql. Please contact to administrators.").into_response()))
+                },
+                Err(err) => {
+                    tracing::error!("{}", err);
+                    Err(ErrorResponse::from((StatusCode::INTERNAL_SERVER_ERROR, "Failed to get gachadata.sql. Please contact to administrators.").into_response()))
+                }
+            }
             Err(err) => {
                 tracing::error!("{}", err);
-                (StatusCode::INTERNAL_SERVER_ERROR, "Failed to get gachadata.sql. Please contact to administrators.").into_response()
+                Err(ErrorResponse::from((StatusCode::INTERNAL_SERVER_ERROR, "Failed to update gachadata dump. Please contact to administrators.").into_response()))
             }
         }
+
     }
 
 }
@@ -145,7 +170,8 @@ async fn main() {
     let config = Config::from_environment().await.expect("Failed to load config from environment variables.");
 
     let mysql_dump_connection = MySQLDumpConnection {
-        connection_information: config.mysql
+        connection_information: config.mysql,
+        dump: Arc::new(Mutex::default())
     };
 
     let router = Router::new()

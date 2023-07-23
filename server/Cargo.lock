@@ -198,6 +198,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "bytes",
  "envy",
  "serde",
  "tokio",
