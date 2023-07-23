@@ -1,4 +1,7 @@
 use anyhow::anyhow;
+use axum::{Router, ServiceExt};
+use axum::routing::get;
+use crate::infra_repository_impls::MySQLDumpConnection;
 
 mod domain {
     use std::fmt::Debug;
@@ -75,8 +78,9 @@ mod presentation {
     use axum::response::IntoResponse;
     use tokio_util::io::ReaderStream;
     use crate::domain::GachaDataRepository;
+    use crate::infra_repository_impls::MySQLDumpConnection;
 
-    pub async fn get_gachadata_handler(State(repository): &State<dyn GachaDataRepository>) -> impl IntoResponse {
+    pub async fn get_gachadata_handler(State(repository): &State<MySQLDumpConnection>) -> impl IntoResponse {
         match repository.get_gachadata().await {
             Ok(gachadataDump) => {
                 let stream = ReaderStream::new(gachadataDump.0);
@@ -131,9 +135,17 @@ async fn main() {
     use crate::config::Config;
 
     let config = Config::from_environment()
-        .map_err(anyhow!("Failed to load config from environment variables."))?;
+        .map_err(anyhow!("Failed to load config from environment variables.")).unwrap();
+
+    let mysql_dump_connection = MySQLDumpConnection {
+        connection_information: config.mysql
+    };
+
+    let router = Router::new()
+        .route("/", get(presentation::get_gachadata_handler))
+        .with_state(mysql_dump_connection);
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], config.http_port.port));
 
-    axum::Server::bind(&addr).await?
+    axum::Server::bind(&addr).serve(router.into_make_service()).await.unwrap()
 }
