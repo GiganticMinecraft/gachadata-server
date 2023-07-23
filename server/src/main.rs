@@ -68,6 +68,31 @@ mod infra_repository_impls {
 
 }
 
+mod presentation {
+    use axum::body::StreamBody;
+    use axum::extract::State;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use tokio_util::io::ReaderStream;
+    use crate::domain::GachaDataRepository;
+
+    pub async fn get_gachadata_handler(State(repository): &State<dyn GachaDataRepository>) -> impl IntoResponse {
+        match repository.get_gachadata().await {
+            Ok(gachadataDump) => {
+                let stream = ReaderStream::new(gachadataDump.0);
+                let body = StreamBody::new(stream);
+
+                (StatusCode::OK, body).into_response()
+            },
+            Err(err) => {
+                tracing::error!("{}", err);
+                (StatusCode::INTERNAL_SERVER_ERROR, "Failed to get gachadata.sql. Please contact to administrators.").into_response()
+            }
+        }
+    }
+
+}
+
 mod config {
 
     pub struct HttpPort {
