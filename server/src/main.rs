@@ -69,11 +69,14 @@ mod infra_repository_impls {
             let is_after_more_than_quarter_hour = match self.dump.lock() {
                 Ok(dump) => {
                     let quarter_hour = Duration::from_secs(900);
-                    let dump_time = dump.dump_time.ok_or(anyhow!("Failed to get last dump time."))?;
+                    let dump_time = dump.dump_time;
 
                     let quarter_hour_from_now = SystemTime::now().sub(quarter_hour);
 
-                    quarter_hour_from_now < dump_time
+                    match dump_time {
+                        Some(dump_time) => quarter_hour_from_now > dump_time,
+                        None => true // dump_timeがNoneになるのは起動して一度も取得されていないときのみ
+                    }
                 },
                 _ => false
             };
@@ -92,10 +95,11 @@ mod presentation {
     use axum::extract::State;
     use axum::http::StatusCode;
     use axum::response::{ErrorResponse, IntoResponse, Response, Result};
+    use crate::domain::GachaDataRepository;
     use crate::infra_repository_impls::MySQLDumpConnection;
 
     pub async fn get_gachadata_handler(State(repository): State<MySQLDumpConnection>) -> Result<impl IntoResponse> {
-        match repository.run_gachadata_dump().await {
+        match repository.update_gachadata().await {
             Ok(_) => match repository.dump.lock() {
                 Ok(gachadata_dump) if !gachadata_dump.dump.0.is_empty() => {
 
@@ -114,6 +118,7 @@ mod presentation {
                 }
             }
             Err(err) => {
+                println!("err, {}", err);
                 tracing::error!("{}", err);
                 Err(ErrorResponse::from((StatusCode::INTERNAL_SERVER_ERROR, "Failed to update gachadata dump. Please contact to administrators.").into_response()))
             }
