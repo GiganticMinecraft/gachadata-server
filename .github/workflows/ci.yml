@@ -1,0 +1,30 @@
+name: CheckCode
+on:
+  push:
+
+jobs:
+  fmt:
+    name: fmt check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - run: rustup component add rustfmt
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+        working-directory: ./server
+
+  clippy:
+    name: clippy check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: LoliGothick/clippy-check@v0.3.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          deny: warnings
+          working-directory: ./server
