@@ -4,6 +4,9 @@ on:
     branches:
       - main
 
+env:
+  image_name: ghcr.io/giganticminecraft/gachadata-server
+
 jobs:
   build-image:
     name: Build server docker image
@@ -35,14 +38,13 @@ jobs:
           tags: |
             type=sha,prefix=sha-,suffix=,format=short
 
-      - name: Build (and push if on master)
+      - name: Build
         id: docker_build
         uses: docker/build-push-action@v4
         with:
           context: ./server
           file: ./Dockerfile
           builder: ${{ steps.buildx.outputs.name }}
-          push: ${{ github.ref == 'refs/heads/master' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
