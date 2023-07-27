@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex};
+use tracing_subscriber::layer::SubscriberExt;
 
 mod domain {
     use bytes::Bytes;
