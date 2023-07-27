@@ -10,5 +10,8 @@
 | MYSQL_USER     | ゲームデータがあるMYSQLにアクセスできるユーザー名 | user     | 
 | MYSQL_PASSWORD | `MYSQL_USER`で指定したユーザーのパスワード        | password | 
 
+# gachadata-serverから`gachadata.sql`をダウンロードする
+`http(s)://[gachadata-serverの接続先]/` に対して`GET`リクエストをすることでダウンロードできます。
+
 # 俯瞰図
 ![overview](./docs/overview.drawio.svg)
