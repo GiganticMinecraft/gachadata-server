@@ -191,6 +191,19 @@ async fn main() {
     use axum::routing::get;
     use axum::Router;
 
+    let _guard = sentry::init((
+        "https://d1672e23eefd4bc49b6081a051951f85@sentry.onp.admin.seichi.click/10",
+        sentry::ClientOptions {
+            release: sentry::release_name!(),
+            traces_sample_rate: 1.0,
+            enable_profiling: true,
+            profiles_sample_rate: 1.0,
+            ..Default::default()
+        },
+    ));
+
+    sentry::configure_scope(|scope| scope.set_level(Some(sentry::Level::Warning)));
+
     let config = Config::from_environment()
         .await
         .expect("Failed to load config from environment variables.");
@@ -205,6 +218,8 @@ async fn main() {
         .with_state(mysql_dump_connection);
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], config.http_port.port));
+
+    tracing::info!("Listening on {}", config.http_port.port);
 
     axum::Server::bind(&addr)
         .serve(router.into_make_service())
