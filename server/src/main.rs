@@ -35,6 +35,8 @@ mod infra_repository_impls {
     }
 
     impl MySQLDumpConnection {
+
+        #[tracing::instrument]
         pub async fn run_gachadata_dump(&self) -> anyhow::Result<()> {
             let MySQL {
                 host: address,
@@ -72,6 +74,8 @@ mod infra_repository_impls {
 
     #[async_trait::async_trait]
     impl GachaDataRepository for MySQLDumpConnection {
+
+        #[tracing::instrument]
         async fn update_gachadata(&self) -> anyhow::Result<()> {
             let is_after_more_than_quarter_hour = match self.dump.lock() {
                 Ok(dump) => {
@@ -105,6 +109,7 @@ mod presentation {
     use axum::http::StatusCode;
     use axum::response::{ErrorResponse, IntoResponse, Response, Result};
 
+    #[tracing::instrument]
     pub async fn get_gachadata_handler(
         State(repository): State<MySQLDumpConnection>,
     ) -> Result<impl IntoResponse> {
