@@ -1,6 +1,3 @@
-use std::sync::{Arc, Mutex};
-use tracing_subscriber::layer::SubscriberExt;
-
 mod domain {
     use bytes::Bytes;
     use std::fmt::Debug;
@@ -191,6 +188,19 @@ async fn main() {
     use crate::presentation::get_gachadata_handler;
     use axum::routing::get;
     use axum::Router;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::Layer;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use std::sync::{Arc, Mutex};
+
+    tracing_subscriber::registry()
+        .with(sentry::integrations::tracing::layer())
+        .with(
+            tracing_subscriber::fmt::layer().with_filter(tracing_subscriber::EnvFilter::new(
+                std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
+            )),
+        )
+        .init();
 
     let _guard = sentry::init((
         "https://d1672e23eefd4bc49b6081a051951f85@sentry.onp.admin.seichi.click/10",
