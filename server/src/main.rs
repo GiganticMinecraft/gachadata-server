@@ -39,7 +39,7 @@ mod infra_repository_impls {
     impl MySQLDumpConnection {
         pub async fn run_gachadata_dump(&self) -> anyhow::Result<()> {
             let MySQL {
-                address,
+                host: address,
                 port,
                 user,
                 password,
@@ -159,7 +159,7 @@ mod config {
 
     #[derive(Debug, Clone, Deserialize)]
     pub struct MySQL {
-        pub address: String,
+        pub host: String,
         pub port: u16,
         pub user: String,
         pub password: String,
