@@ -11,8 +11,9 @@ async-trait = "0.1.72"
 axum = "0.6.19"
 bytes = "1.4.0"
 envy = "0.4.2"
-sentry = "0.31.5"
+sentry = { version = "0.31.5", features = ["tracing"] }
 serde = { version = "1.0.176", features = ["derive"] }
 tokio = { version = "1.29.1", features = ["full"] }
 tokio-util = { version = "0.7.8", features = ["io"] }
 tracing = "0.1.37"
+tracing-subscriber = { version = "0.3.17", features = ["std", "registry", "env-filter"] }

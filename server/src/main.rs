@@ -1,5 +1,3 @@
-use std::sync::{Arc, Mutex};
-
 mod domain {
     use bytes::Bytes;
     use std::fmt::Debug;
@@ -37,6 +35,7 @@ mod infra_repository_impls {
     }
 
     impl MySQLDumpConnection {
+        #[tracing::instrument]
         pub async fn run_gachadata_dump(&self) -> anyhow::Result<()> {
             let MySQL {
                 host: address,
@@ -74,6 +73,7 @@ mod infra_repository_impls {
 
     #[async_trait::async_trait]
     impl GachaDataRepository for MySQLDumpConnection {
+        #[tracing::instrument]
         async fn update_gachadata(&self) -> anyhow::Result<()> {
             let is_after_more_than_quarter_hour = match self.dump.lock() {
                 Ok(dump) => {
@@ -107,6 +107,7 @@ mod presentation {
     use axum::http::StatusCode;
     use axum::response::{ErrorResponse, IntoResponse, Response, Result};
 
+    #[tracing::instrument]
     pub async fn get_gachadata_handler(
         State(repository): State<MySQLDumpConnection>,
     ) -> Result<impl IntoResponse> {
@@ -190,6 +191,19 @@ async fn main() {
     use crate::presentation::get_gachadata_handler;
     use axum::routing::get;
     use axum::Router;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::Layer;
+
+    tracing_subscriber::registry()
+        .with(sentry::integrations::tracing::layer())
+        .with(
+            tracing_subscriber::fmt::layer().with_filter(tracing_subscriber::EnvFilter::new(
+                std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
+            )),
+        )
+        .init();
 
     let _guard = sentry::init((
         "https://d1672e23eefd4bc49b6081a051951f85@sentry.onp.admin.seichi.click/10",
