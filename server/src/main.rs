@@ -35,7 +35,6 @@ mod infra_repository_impls {
     }
 
     impl MySQLDumpConnection {
-
         #[tracing::instrument]
         pub async fn run_gachadata_dump(&self) -> anyhow::Result<()> {
             let MySQL {
@@ -74,7 +73,6 @@ mod infra_repository_impls {
 
     #[async_trait::async_trait]
     impl GachaDataRepository for MySQLDumpConnection {
-
         #[tracing::instrument]
         async fn update_gachadata(&self) -> anyhow::Result<()> {
             let is_after_more_than_quarter_hour = match self.dump.lock() {
@@ -193,10 +191,10 @@ async fn main() {
     use crate::presentation::get_gachadata_handler;
     use axum::routing::get;
     use axum::Router;
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::Layer;
-    use tracing_subscriber::util::SubscriberInitExt;
     use std::sync::{Arc, Mutex};
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::Layer;
 
     tracing_subscriber::registry()
         .with(sentry::integrations::tracing::layer())
