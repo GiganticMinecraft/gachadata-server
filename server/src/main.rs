@@ -90,6 +90,7 @@ mod infra_repository_impls {
                 _ => false,
             };
 
+            // 最終dumpの取得から15分以上経過していればGachaDumpを更新する
             if is_after_more_than_quarter_hour {
                 self.run_gachadata_dump().await?
             }
@@ -119,7 +120,8 @@ mod presentation {
                 Ok(_) => Err(ErrorResponse::from(
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        "Failed to get gachadata.sql. Please contact to administrators.",
+                        "GachadataDump is empty. \
+                        Please contact to administrators.",
                     )
                         .into_response(),
                 )),
@@ -128,19 +130,20 @@ mod presentation {
                     Err(ErrorResponse::from(
                         (
                             StatusCode::INTERNAL_SERVER_ERROR,
-                            "Failed to get gachadata.sql. Please contact to administrators.",
+                            "Failed to lock repository mutex.\
+                             Please contact to administrators.",
                         )
                             .into_response(),
                     ))
                 }
             },
             Err(err) => {
-                println!("err, {}", err);
                 tracing::error!("{}", err);
                 Err(ErrorResponse::from(
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        "Failed to update gachadata dump. Please contact to administrators.",
+                        "Failed to update gachadata dump. \
+                        Please contact to administrators.",
                     )
                         .into_response(),
                 ))
