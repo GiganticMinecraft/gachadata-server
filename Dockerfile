@@ -16,7 +16,8 @@ RUN cargo chef cook --release --recipe-path recipe.json
 COPY --link . .
 RUN cargo build --release
 
-FROM gcr.io/distroless/cc
+FROM ubuntu:22.04
 LABEL org.opencontainers.image.source=https://github.com/GiganticMinecraft/gachadata-server
+RUN apt-get update -y && apt-get install mysql-client-core
 COPY --from=build-env --link /app/target/release/gachadata-server /
 CMD ["./gachadata-server"]
