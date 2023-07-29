@@ -196,6 +196,7 @@ async fn main() {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
     use tracing_subscriber::Layer;
+    use sentry::integrations::tower::{NewSentryLayer, SentryHttpLayer};
 
     tracing_subscriber::registry()
         .with(sentry::integrations::tracing::layer())
@@ -219,6 +220,10 @@ async fn main() {
 
     sentry::configure_scope(|scope| scope.set_level(Some(sentry::Level::Warning)));
 
+    let layer = tower::ServiceBuilder::new()
+        .layer(NewSentryLayer::new_from_top())
+        .layer(SentryHttpLayer::with_transaction());
+
     let config = Config::from_environment()
         .await
         .expect("Failed to load config from environment variables.");
@@ -230,7 +235,8 @@ async fn main() {
 
     let router = Router::new()
         .route("/", get(get_gachadata_handler))
-        .with_state(mysql_dump_connection);
+        .with_state(mysql_dump_connection)
+        .layer(layer);
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], config.http_port.port));
 
