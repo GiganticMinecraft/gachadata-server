@@ -116,6 +116,7 @@ mod presentation {
                 Ok(gachadata_dump) if !gachadata_dump.dump.0.is_empty() => Ok(Response::builder()
                     .status(StatusCode::OK)
                     .header("Content-Disposition", "attachment; filename=gachadata.sql")
+                    .header("Content-Type", "application/sql")
                     .body(gachadata_dump.dump.0.to_owned().into_response())
                     .unwrap()),
                 Ok(_) => Err(ErrorResponse::from(
