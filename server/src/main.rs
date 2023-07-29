@@ -192,11 +192,11 @@ async fn main() {
     use crate::presentation::get_gachadata_handler;
     use axum::routing::get;
     use axum::Router;
+    use sentry::integrations::tower::{NewSentryLayer, SentryHttpLayer};
     use std::sync::{Arc, Mutex};
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
     use tracing_subscriber::Layer;
-    use sentry::integrations::tower::{NewSentryLayer, SentryHttpLayer};
 
     tracing_subscriber::registry()
         .with(sentry::integrations::tracing::layer())
