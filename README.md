@@ -13,6 +13,11 @@
 | MYSQL_USER     | ゲームデータがあるMYSQLにアクセスできるユーザー名 | user     | 
 | MYSQL_PASSWORD | `MYSQL_USER`で指定したユーザーのパスワード        | password | 
 
+# `gachadata.sql`に含まれているデータ
+`gachadata.sql`には以下のテーブルのdumpが含まれています
+- gachadataテーブル(ガチャ景品データ)
+- gacha_eventsテーブル(ガチャ景品のイベントデータ)
+
 # gachadata-serverから`gachadata.sql`をダウンロードする
 `http(s)://[gachadata-serverの接続先]/` に対して`GET`リクエストをすることでダウンロードできます。
 

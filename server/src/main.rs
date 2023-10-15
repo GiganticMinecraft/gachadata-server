@@ -55,6 +55,7 @@ mod infra_repository_impls {
                     format!("-p{}", password).as_str(),
                     "seichiassist",
                     "gachadata",
+                    "gacha_events",
                 ])
                 .output()?;
 
