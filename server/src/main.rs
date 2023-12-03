@@ -1,3 +1,5 @@
+use tokio::net::TcpListener;
+
 mod domain {
     use bytes::Bytes;
     use std::fmt::Debug;
@@ -241,8 +243,9 @@ async fn main() {
 
     tracing::info!("Listening on {}", config.http_port.port);
 
-    axum::Server::bind(&addr)
-        .serve(router.into_make_service())
+    let listener = TcpListener::bind(addr).await.unwrap();
+
+    axum::serve(listener, router)
         .await
         .unwrap()
 }
