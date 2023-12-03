@@ -1,5 +1,3 @@
-use tokio::net::TcpListener;
-
 mod domain {
     use bytes::Bytes;
     use std::fmt::Debug;
@@ -190,16 +188,15 @@ mod config {
 
 #[tokio::main]
 async fn main() {
-    use crate::config::Config;
-    use crate::infra_repository_impls::MySQLDumpConnection;
-    use crate::presentation::get_gachadata_handler;
-    use axum::routing::get;
-    use axum::Router;
+    use crate::{
+        config::Config, infra_repository_impls::MySQLDumpConnection,
+        presentation::get_gachadata_handler,
+    };
+    use axum::{routing::get, Router};
     use sentry::integrations::tower::{NewSentryLayer, SentryHttpLayer};
     use std::sync::{Arc, Mutex};
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
-    use tracing_subscriber::Layer;
+    use tokio::net::TcpListener;
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
     tracing_subscriber::registry()
         .with(sentry::integrations::tracing::layer())
