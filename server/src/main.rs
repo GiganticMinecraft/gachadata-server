@@ -245,7 +245,5 @@ async fn main() {
 
     let listener = TcpListener::bind(addr).await.unwrap();
 
-    axum::serve(listener, router)
-        .await
-        .unwrap()
+    axum::serve(listener, router).await.unwrap()
 }
