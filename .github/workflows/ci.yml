@@ -23,7 +23,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: LoliGothick/clippy-check@v0.3.1
+      - uses: LoliGothick/clippy-check@v0.3.2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           deny: warnings
