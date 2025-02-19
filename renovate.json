@@ -5,6 +5,5 @@
     ":dependencyDashboard"
   ],
   "automerge": true,
-  "platformAutomerge": true,
-  "reviewers": ["rito528"]
+  "platformAutomerge": true
 }
