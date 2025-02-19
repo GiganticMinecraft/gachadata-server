@@ -6,16 +6,15 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = "1.0.94"
-async-trait = "0.1.83"
-axum = "0.7.9"
-bytes = "1.9.0"
+anyhow = "1.0.95"
+async-trait = "0.1.86"
+axum = "0.8.1"
+bytes = "1.10.0"
 envy = "0.4.2"
 # default featureは推移的にnative-tls featureを有効しているため、native-tls (LinuxではOpenSSL) を連れてくる。これをオプトアウトするためにrustlsを使う。
-sentry = { version = "0.35.0", default-features = false, features = ["backtrace", "contexts", "panic", "anyhow", "reqwest", "tracing", "debug-images", "rustls", "tower", "tower-http"] }
-serde = { version = "1.0.215", features = ["derive"] }
-tokio = { version = "1.42.0", features = ["full"] }
-tokio-util = { version = "0.7.12", features = ["io"] }
-tower = "0.5.1"
+sentry = { version = "0.36.0", default-features = false, features = ["backtrace", "contexts", "panic", "anyhow", "reqwest", "tracing", "debug-images", "rustls", "tower", "tower-http"] }
+serde = { version = "1.0.217", features = ["derive"] }
+tokio = { version = "1.43.0", features = ["full"] }
+tower = "0.5.2"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["std", "registry", "env-filter"] }
