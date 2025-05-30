@@ -192,11 +192,11 @@ async fn main() {
         config::Config, infra_repository_impls::MySQLDumpConnection,
         presentation::get_gachadata_handler,
     };
-    use axum::{routing::get, Router};
+    use axum::{Router, routing::get};
     use sentry::integrations::tower::{NewSentryLayer, SentryHttpLayer};
     use std::sync::{Arc, Mutex};
     use tokio::net::TcpListener;
-    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
+    use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
     tracing_subscriber::registry()
         .with(sentry::integrations::tracing::layer())
