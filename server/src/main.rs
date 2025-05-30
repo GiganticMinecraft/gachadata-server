@@ -44,13 +44,13 @@ mod infra_repository_impls {
                 password,
             } = &self.connection_information;
 
-            let output = Command::new("mysqldump")
+            let output = Command::new("mariadb-dump")
                 .args(vec![
-                    "-h",
+                    "--host",
                     address,
                     "--port",
                     port.to_string().as_str(),
-                    "-u",
+                    "--user",
                     user,
                     format!("-p{}", password).as_str(),
                     "seichiassist",
