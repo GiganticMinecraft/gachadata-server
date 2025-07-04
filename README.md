@@ -2,7 +2,7 @@
 整地鯖のガチャデータを公開するためのサーバー
 
 # 前提ソフトウェア
-- mysql-client (sql dumpを取得するために必要)
+- [mariadb-client](https://mariadb.com/docs/server/clients-and-utilities/mariadb-client) (sql dumpを取得するために必要)
 
 # 環境変数
 | 環境変数名      | 説明                                              | 例       | 
