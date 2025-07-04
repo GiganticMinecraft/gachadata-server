@@ -5,5 +5,13 @@
     ":dependencyDashboard"
   ],
   "automerge": true,
-  "platformAutomerge": true
+  "platformAutomerge": true,
+  "packageRules": [
+    {
+      "matchManagers": [
+        "cargo"
+      ],
+      "rangeStrategy": "pin"
+    }
+  ]
 }
