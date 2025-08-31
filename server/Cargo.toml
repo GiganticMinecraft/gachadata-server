@@ -17,4 +17,4 @@ serde = { version = "=1.0.217", features = ["derive"] }
 tokio = { version = "=1.47.1", features = ["full"] }
 tower = "=0.5.2"
 tracing = "=0.1.41"
-tracing-subscriber = { version = "=0.3.19", features = ["std", "registry", "env-filter"] }
+tracing-subscriber = { version = "=0.3.20", features = ["std", "registry", "env-filter"] }
