@@ -220,7 +220,7 @@ async fn main() {
 
     let layer = tower::ServiceBuilder::new()
         .layer(NewSentryLayer::new_from_top())
-        .layer(SentryHttpLayer::with_transaction());
+        .layer(SentryHttpLayer::new().enable_transaction());
 
     let config = Config::from_environment()
         .await
