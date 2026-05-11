@@ -1412,9 +1412,9 @@ checksum = "61697e0a1c7e512e84a621326239844a24d8207b4669b41bc18b32ea5cbf988b"
 
 [[package]]
 name = "sentry"
-version = "0.48.0"
+version = "0.48.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8ac94aab850a23d7507307cc505332ed2bafd36c65930dfc5c43610f9e9b477"
+checksum = "b93b3e19f45495ddd41d8222a152c48c84f6ba45abe9c69e2527e9cdea29bb5b"
 dependencies = [
  "cfg_aliases",
  "httpdate",
