@@ -248,9 +248,12 @@ async fn main() {
     let _pyroscope_agent = std::env::var("PYROSCOPE_SERVER_ADDRESS")
         .ok()
         .and_then(|server_address| {
+            // application 名は game-data-publisher と同じく env で上書き可能にする
+            let application_name = std::env::var("PYROSCOPE_APPLICATION_NAME")
+                .unwrap_or_else(|_| "gachadata-server".to_owned());
             let started = PyroscopeAgentBuilder::new(
                 &server_address,
-                "gachadata-server",
+                &application_name,
                 100,
                 "pyroscope-rs",
                 env!("CARGO_PKG_VERSION"),
