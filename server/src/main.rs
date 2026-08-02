@@ -1,3 +1,7 @@
+mod logging;
+mod panic_hook;
+mod telemetry;
+
 mod domain {
     use bytes::Bytes;
     use std::fmt::Debug;
@@ -193,34 +197,76 @@ async fn main() {
         presentation::get_gachadata_handler,
     };
     use axum::{Router, routing::get};
-    use sentry::integrations::tower::{NewSentryLayer, SentryHttpLayer};
+    use axum_tracing_opentelemetry::middleware::{OtelAxumLayer, OtelInResponseLayer};
+    use opentelemetry::trace::TracerProvider as _;
+    use pyroscope::backend::{BackendConfig, PprofConfig, pprof_backend};
+    use pyroscope::pyroscope::PyroscopeAgentBuilder;
     use std::sync::{Arc, Mutex};
     use tokio::net::TcpListener;
+    use tower_http::catch_panic::CatchPanicLayer;
     use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
-    tracing_subscriber::registry()
-        .with(sentry::integrations::tracing::layer())
-        .with(
-            tracing_subscriber::fmt::layer().with_filter(tracing_subscriber::EnvFilter::new(
-                std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
-            )),
+    // OTel トレーシング (OTLP http/protobuf)。
+    // OTEL_EXPORTER_OTLP_ENDPOINT 未設定または OTEL_SDK_DISABLED=true なら無効
+    let tracer_provider = telemetry::init_tracer_provider();
+
+    // stdout ログ: 本番は 1 行 JSON (trace_id 注入付き)、ローカル (ENV_NAME=local) は
+    // 人間向けフォーマット。LOG_FORMAT=json|pretty で明示上書き可
+    let stdout_log_filter = || {
+        tracing_subscriber::EnvFilter::new(
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
         )
+    };
+    let json_logs_enabled = logging::json_logs_enabled(
+        std::env::var("ENV_NAME").ok().as_deref(),
+        std::env::var("LOG_FORMAT").ok().as_deref(),
+    );
+    let (json_log_layer, pretty_log_layer) = if json_logs_enabled {
+        (
+            Some(logging::json_log_layer().with_filter(stdout_log_filter())),
+            None,
+        )
+    } else {
+        (
+            None,
+            Some(tracing_subscriber::fmt::layer().with_filter(stdout_log_filter())),
+        )
+    };
+
+    tracing_subscriber::registry()
+        .with(tracer_provider.as_ref().map(|provider| {
+            tracing_opentelemetry::layer().with_tracer(provider.tracer("gachadata-server"))
+        }))
+        .with(json_log_layer)
+        .with(pretty_log_layer)
         .init();
+    panic_hook::install();
 
-    let _guard = sentry::init((
-        "https://d1672e23eefd4bc49b6081a051951f85@sentry.onp.admin.seichi.click/10",
-        sentry::ClientOptions {
-            release: sentry::release_name!(),
-            traces_sample_rate: 1.0,
-            ..Default::default()
-        },
-    ));
+    // 継続プロファイリング (Grafana Pyroscope への push)。
+    // PYROSCOPE_SERVER_ADDRESS 未設定なら無効。起動失敗はサーバー本体を止めない。
+    // agent はプロセスの生存期間中動かし続けるため束縛だけ保持する
+    let _pyroscope_agent = std::env::var("PYROSCOPE_SERVER_ADDRESS")
+        .ok()
+        .and_then(|server_address| {
+            let started = PyroscopeAgentBuilder::new(
+                &server_address,
+                "gachadata-server",
+                100,
+                "pyroscope-rs",
+                env!("CARGO_PKG_VERSION"),
+                pprof_backend(PprofConfig::default(), BackendConfig::default()),
+            )
+            .build()
+            .and_then(pyroscope::PyroscopeAgent::start);
 
-    sentry::configure_scope(|scope| scope.set_level(Some(sentry::Level::Warning)));
-
-    let layer = tower::ServiceBuilder::new()
-        .layer(NewSentryLayer::new_from_top())
-        .layer(SentryHttpLayer::new().enable_transaction());
+            match started {
+                Ok(agent) => Some(agent),
+                Err(error) => {
+                    tracing::warn!(%error, "Pyroscope agent の起動に失敗したため、プロファイルなしで続行します");
+                    None
+                }
+            }
+        });
 
     let config = Config::from_environment()
         .await
@@ -234,7 +280,13 @@ async fn main() {
     let router = Router::new()
         .route("/", get(get_gachadata_handler))
         .with_state(mysql_dump_connection)
-        .layer(layer);
+        // handler 内 panic で 500 を返し、コネクションを維持する
+        // (panic 自体は panic_hook が panic=true 付きでログに残す)
+        .layer(CatchPanicLayer::new())
+        // レスポンスヘッダーへの trace context 挿入 (OtelAxumLayer より内側に置く)
+        .layer(OtelInResponseLayer)
+        // リクエストごとの OTel サーバースパン開始
+        .layer(OtelAxumLayer::default());
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], config.http_port.port));
 
@@ -242,5 +294,10 @@ async fn main() {
 
     let listener = TcpListener::bind(addr).await.unwrap();
 
-    axum::serve(listener, router).await.unwrap()
+    axum::serve(listener, router).await.unwrap();
+
+    // serve が戻るのはシャットダウン時のみ。バッファ済みスパンを flush する
+    if let Some(provider) = tracer_provider {
+        let _ = provider.shutdown();
+    }
 }

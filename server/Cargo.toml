@@ -9,12 +9,23 @@ edition = "2024"
 anyhow = "=1.0.104"
 async-trait = "=0.1.91"
 axum = "=0.8.9"
+axum-tracing-opentelemetry = "=0.38.0"
 bytes = "=1.12.1"
 envy = "=0.4.2"
-# default featureは推移的にnative-tls featureを有効しているため、native-tls (LinuxではOpenSSL) を連れてくる。これをオプトアウトするためにrustlsを使う。
-sentry = { version = "=0.48.5", default-features = false, features = ["backtrace", "contexts", "panic", "anyhow", "reqwest", "tracing", "debug-images", "rustls", "tower", "tower-http"] }
+# JSON ログに OTel trace_id を注入する (tracing-subscriber 標準の JSON では出せない)
+json-subscriber = { version = "=0.3.0", features = ["tracing-opentelemetry-0-33"] }
+opentelemetry = "=0.32.0"
+opentelemetry-otlp = { version = "=0.32.0", default-features = false, features = ["http-proto", "trace", "reqwest-blocking-client"] }
+opentelemetry_sdk = "=0.32.1"
+# 継続プロファイリング (Grafana Pyroscope への push)。default の rustls-tls を使う
+pyroscope = { version = "=2.1.1", features = ["backend-pprof-rs"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 tokio = { version = "=1.53.1", features = ["full"] }
 tower = "=0.5.3"
+tower-http = { version = "=0.7.0", features = ["catch-panic"] }
 tracing = "=0.1.44"
+tracing-opentelemetry = "=0.33.0"
 tracing-subscriber = { version = "=0.3.23", features = ["std", "registry", "env-filter"] }
+
+[dev-dependencies]
+serde_json = "=1.0.133"
