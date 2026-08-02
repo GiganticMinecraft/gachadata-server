@@ -1,5 +1,8 @@
 # syntax=docker/dockerfile:1.25
-FROM lukemathwalker/cargo-chef:latest-rust-1.87 AS chef
+# NOTE: Rustのバージョンはrust-toolchain.tomlと合わせること (Renovateはこのタグ形式を追跡できない)。
+# また、実行ステージ (ubuntu:24.04, glibc 2.39) で動くバイナリにするため、
+# glibcがより古いbookworm variantを使う (デフォルトのtrixieはglibc 2.41)
+FROM lukemathwalker/cargo-chef:latest-rust-1.97.1-bookworm AS chef
 WORKDIR /app
 
 FROM chef AS planner
@@ -21,7 +24,7 @@ LABEL org.opencontainers.image.source=https://github.com/GiganticMinecraft/gacha
 RUN apt-get update -y && apt-get install -y curl
 
 RUN curl -LsSO https://downloads.mariadb.com/MariaDB/mariadb_repo_setup
-RUN echo "73f4ab14ccc3ceb8c03bb283dd131a3235cfc28086475f43e9291d2060d48c97 mariadb_repo_setup" \
+RUN echo "7325ac7755809ca3312b446bd832542421699298f25b701f9a111bb42df0c7c1 mariadb_repo_setup" \
         | sha256sum -c -
 RUN chmod +x mariadb_repo_setup
 RUN ./mariadb_repo_setup \
