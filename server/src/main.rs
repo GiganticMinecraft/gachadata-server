@@ -7,8 +7,17 @@ mod domain {
     use std::fmt::Debug;
     use std::time::SystemTime;
 
-    #[derive(Debug, Clone, Default)]
+    #[derive(Clone, Default)]
     pub struct GachadataDump(pub Bytes);
+
+    // dump の中身 (SQL 全文) を Debug 出力に含めない
+    impl Debug for GachadataDump {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("GachadataDump")
+                .field("len_bytes", &self.0.len())
+                .finish()
+        }
+    }
 
     #[derive(Debug, Clone, Default)]
     pub struct GachadataDumpWithTime {
@@ -39,7 +48,9 @@ mod infra_repository_impls {
     }
 
     impl MySQLDumpConnection {
-        #[tracing::instrument]
+        // self を skip しないと Debug 経由で MySQL パスワードとキャッシュ済み
+        // dump 全体が span 属性としてトレース基盤へ送られる
+        #[tracing::instrument(skip(self))]
         pub async fn run_gachadata_dump(&self) -> anyhow::Result<()> {
             let MySQL {
                 host: address,
@@ -78,7 +89,8 @@ mod infra_repository_impls {
 
     #[async_trait::async_trait]
     impl GachaDataRepository for MySQLDumpConnection {
-        #[tracing::instrument]
+        // skip(self): run_gachadata_dump と同じ理由
+        #[tracing::instrument(skip(self))]
         async fn update_gachadata(&self) -> anyhow::Result<()> {
             let is_after_more_than_quarter_hour = match self.dump.lock() {
                 Ok(dump) => {
@@ -112,7 +124,9 @@ mod presentation {
     use axum::http::StatusCode;
     use axum::response::{ErrorResponse, IntoResponse, Response, Result};
 
-    #[tracing::instrument]
+    // skip(repository): Debug 経由で MySQL パスワードとキャッシュ済み dump が
+    // span 属性に入るのを防ぐ
+    #[tracing::instrument(skip(repository))]
     pub async fn get_gachadata_handler(
         State(repository): State<MySQLDumpConnection>,
     ) -> Result<impl IntoResponse> {
@@ -167,12 +181,24 @@ mod config {
         pub port: u16,
     }
 
-    #[derive(Debug, Clone, Deserialize)]
+    #[derive(Clone, Deserialize)]
     pub struct MySQL {
         pub host: String,
         pub port: u16,
         pub user: String,
         pub password: String,
+    }
+
+    // パスワードを Debug 出力に含めない (span/ログへ誤って載せた場合の多層防御)
+    impl std::fmt::Debug for MySQL {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("MySQL")
+                .field("host", &self.host)
+                .field("port", &self.port)
+                .field("user", &self.user)
+                .field("password", &"<redacted>")
+                .finish()
+        }
     }
 
     pub struct Config {
@@ -244,13 +270,16 @@ async fn main() {
 
     // 継続プロファイリング (Grafana Pyroscope への push)。
     // PYROSCOPE_SERVER_ADDRESS 未設定なら無効。起動失敗はサーバー本体を止めない。
-    // agent はプロセスの生存期間中動かし続けるため束縛だけ保持する
-    let _pyroscope_agent = std::env::var("PYROSCOPE_SERVER_ADDRESS")
+    // agent はプロセスの生存期間中動かし続け、graceful shutdown 時に flush する
+    let pyroscope_agent = std::env::var("PYROSCOPE_SERVER_ADDRESS")
         .ok()
         .and_then(|server_address| {
+            // application 名は game-data-publisher と同じく env で上書き可能にする
+            let application_name = std::env::var("PYROSCOPE_APPLICATION_NAME")
+                .unwrap_or_else(|_| "gachadata-server".to_owned());
             let started = PyroscopeAgentBuilder::new(
                 &server_address,
-                "gachadata-server",
+                &application_name,
                 100,
                 "pyroscope-rs",
                 env!("CARGO_PKG_VERSION"),
@@ -294,9 +323,39 @@ async fn main() {
 
     let listener = TcpListener::bind(addr).await.unwrap();
 
-    axum::serve(listener, router).await.unwrap();
+    // SIGTERM (Kubernetes の Pod 停止) / Ctrl-C で serve を抜け、
+    // 下の flush 処理へ到達させる
+    let shutdown_signal = async {
+        let ctrl_c = async {
+            tokio::signal::ctrl_c()
+                .await
+                .expect("failed to install Ctrl-C handler");
+        };
+        let terminate = async {
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to install SIGTERM handler")
+                .recv()
+                .await;
+        };
+        tokio::select! {
+            () = ctrl_c => {},
+            _ = terminate => {},
+        }
+        tracing::info!("shutdown signal received");
+    };
 
-    // serve が戻るのはシャットダウン時のみ。バッファ済みスパンを flush する
+    axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown_signal)
+        .await
+        .unwrap();
+
+    // 終了前に未送信のプロファイル・スパンを flush する
+    if let Some(agent) = pyroscope_agent {
+        match agent.stop() {
+            Ok(agent) => agent.shutdown(),
+            Err(error) => tracing::warn!(%error, "Pyroscope agent の停止に失敗しました"),
+        }
+    }
     if let Some(provider) = tracer_provider {
         let _ = provider.shutdown();
     }
