@@ -14,9 +14,9 @@ bytes = "=1.12.1"
 envy = "=0.4.2"
 # JSON ログに OTel trace_id を注入する (tracing-subscriber 標準の JSON では出せない)
 json-subscriber = { version = "=0.3.0", features = ["tracing-opentelemetry-0-33"] }
-opentelemetry = "=0.32.0"
-opentelemetry-otlp = { version = "=0.32.0", default-features = false, features = ["http-proto", "trace", "reqwest-blocking-client"] }
-opentelemetry_sdk = "=0.32.1"
+opentelemetry = "=0.33.0"
+opentelemetry-otlp = { version = "=0.33.0", default-features = false, features = ["http-proto", "trace", "reqwest-blocking-client"] }
+opentelemetry_sdk = "=0.33.0"
 # 継続プロファイリング (Grafana Pyroscope への push)。default の rustls-tls を使う
 pyroscope = { version = "=2.1.1", features = ["backend-pprof-rs"] }
 serde = { version = "=1.0.229", features = ["derive"] }
