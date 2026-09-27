@@ -24,7 +24,7 @@ LABEL org.opencontainers.image.source=https://github.com/GiganticMinecraft/gacha
 RUN apt-get update -y && apt-get install -y curl
 
 RUN curl -LsSO https://downloads.mariadb.com/MariaDB/mariadb_repo_setup
-RUN echo "7325ac7755809ca3312b446bd832542421699298f25b701f9a111bb42df0c7c1 mariadb_repo_setup" \
+RUN echo "b54c87edfe81b9837ef44a4a4f39383dd8df32776e6a18c0743a5d3ece044ac3 mariadb_repo_setup" \
         | sha256sum -c -
 RUN chmod +x mariadb_repo_setup
 RUN ./mariadb_repo_setup \
