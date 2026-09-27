@@ -2,7 +2,7 @@
 # NOTE: Rustのバージョンはrust-toolchain.tomlと合わせること (Renovateはこのタグ形式を追跡できない)。
 # また、実行ステージ (ubuntu:24.04, glibc 2.39) で動くバイナリにするため、
 # glibcがより古いbookworm variantを使う (デフォルトのtrixieはglibc 2.41)
-FROM lukemathwalker/cargo-chef:latest-rust-1.97.1-bookworm AS chef
+FROM lukemathwalker/cargo-chef:latest-rust-1.98.1-bookworm AS chef
 WORKDIR /app
 
 FROM chef AS planner
