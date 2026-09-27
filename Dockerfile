@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1
 # NOTE: Rustのバージョンはrust-toolchain.tomlと合わせること (Renovateはこのタグ形式を追跡できない)。
-# 実行ステージ (ubuntu:26.04, glibc 2.43) よりglibcが古いtrixie variant (glibc 2.41) でビルドする。
-FROM lukemathwalker/cargo-chef:latest-rust-1.98.1-trixie AS chef
+# また、実行ステージ (ubuntu:24.04, glibc 2.39) で動くバイナリにするため、
+# glibcがより古いbookworm variantを使う (デフォルトのtrixieはglibc 2.41)
+FROM lukemathwalker/cargo-chef:latest-rust-1.98.1-bookworm AS chef
 WORKDIR /app
 
 FROM chef AS planner
@@ -18,7 +19,9 @@ RUN cargo chef cook --release --recipe-path recipe.json
 COPY --link . .
 RUN cargo build --release
 
-FROM ubuntu:26.04
+# MariaDB 11.4.7 の mariadb_repo_setup は Ubuntu 26.04 (resolute) に未対応。
+# MaxScale リポジトリが 404 となり apt update が失敗するため、24.04 を維持する。
+FROM ubuntu:24.04
 LABEL org.opencontainers.image.source=https://github.com/GiganticMinecraft/gachadata-server
 RUN apt-get update -y && apt-get install -y curl
 

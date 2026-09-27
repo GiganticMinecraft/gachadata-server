@@ -26,6 +26,19 @@
         "json-subscriber"
       ],
       "groupName": "OpenTelemetry"
+    },
+    {
+      "description": "MariaDB 11.4.7 のリポジトリ設定が Ubuntu 26.04 (resolute) に未対応のため、ubuntu イメージを更新しない",
+      "matchManagers": [
+        "dockerfile"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "ubuntu"
+      ],
+      "enabled": false
     }
   ]
 }
