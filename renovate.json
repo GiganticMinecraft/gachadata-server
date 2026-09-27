@@ -12,6 +12,20 @@
         "cargo"
       ],
       "rangeStrategy": "pin"
+    },
+    {
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchPackageNames": [
+        "opentelemetry",
+        "opentelemetry-otlp",
+        "opentelemetry_sdk",
+        "tracing-opentelemetry",
+        "axum-tracing-opentelemetry",
+        "json-subscriber"
+      ],
+      "groupName": "OpenTelemetry"
     }
   ]
 }
