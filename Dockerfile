@@ -1,8 +1,7 @@
 # syntax=docker/dockerfile:1
 # NOTE: Rustのバージョンはrust-toolchain.tomlと合わせること (Renovateはこのタグ形式を追跡できない)。
-# また、実行ステージ (ubuntu:24.04, glibc 2.39) で動くバイナリにするため、
-# glibcがより古いbookworm variantを使う (デフォルトのtrixieはglibc 2.41)
-FROM lukemathwalker/cargo-chef:latest-rust-1.98.1-bookworm AS chef
+# 実行ステージ (ubuntu:26.04, glibc 2.43) よりglibcが古いtrixie variant (glibc 2.41) でビルドする。
+FROM lukemathwalker/cargo-chef:latest-rust-1.98.1-trixie AS chef
 WORKDIR /app
 
 FROM chef AS planner
