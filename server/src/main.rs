@@ -122,14 +122,14 @@ mod presentation {
     use crate::infra_repository_impls::MySQLDumpConnection;
     use axum::extract::State;
     use axum::http::StatusCode;
-    use axum::response::{ErrorResponse, IntoResponse, Response, Result};
+    use axum::response::{IntoResponse, Response};
 
     // skip(repository): Debug 経由で MySQL パスワードとキャッシュ済み dump が
     // span 属性に入るのを防ぐ
     #[tracing::instrument(skip(repository))]
     pub async fn get_gachadata_handler(
         State(repository): State<MySQLDumpConnection>,
-    ) -> Result<impl IntoResponse> {
+    ) -> Result<impl IntoResponse, (StatusCode, &'static str)> {
         match repository.update_gachadata().await {
             Ok(_) => match repository.dump.lock() {
                 Ok(gachadata_dump) if !gachadata_dump.dump.0.is_empty() => Ok(Response::builder()
@@ -138,35 +138,26 @@ mod presentation {
                     .header("Content-Type", "application/sql")
                     .body(gachadata_dump.dump.0.to_owned().into_response())
                     .unwrap()),
-                Ok(_) => Err(ErrorResponse::from(
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "GachadataDump is empty. \
-                        Please contact to administrators.",
-                    )
-                        .into_response(),
+                Ok(_) => Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "GachadataDump is empty. \
+                    Please contact to administrators.",
                 )),
                 Err(err) => {
                     tracing::error!("{}", err);
-                    Err(ErrorResponse::from(
-                        (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "Failed to lock repository mutex.\
-                             Please contact to administrators.",
-                        )
-                            .into_response(),
+                    Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Failed to lock repository mutex.\
+                         Please contact to administrators.",
                     ))
                 }
             },
             Err(err) => {
                 tracing::error!("{}", err);
-                Err(ErrorResponse::from(
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "Failed to update gachadata dump. \
-                        Please contact to administrators.",
-                    )
-                        .into_response(),
+                Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to update gachadata dump. \
+                    Please contact to administrators.",
                 ))
             }
         }
