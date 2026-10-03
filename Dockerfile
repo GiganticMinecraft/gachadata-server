@@ -30,7 +30,7 @@ RUN echo "b54c87edfe81b9837ef44a4a4f39383dd8df32776e6a18c0743a5d3ece044ac3 maria
         | sha256sum -c -
 RUN chmod +x mariadb_repo_setup
 RUN ./mariadb_repo_setup \
-       --mariadb-server-version="mariadb-11.4.7"
+       --mariadb-server-version="mariadb-12.3.3"
 RUN apt update -y && apt install -y mariadb-client
 
 COPY --from=build-env --link /app/target/release/gachadata-server /
