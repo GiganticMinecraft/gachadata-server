@@ -54,6 +54,16 @@
         "ubuntu"
       ],
       "enabled": false
+    },
+    {
+      "matchPackageNames": [
+        "MariaDB/server"
+      ],
+      "matchUpdateTypes": [
+        "major",
+        "minor"
+      ],
+      "enabled": false
     }
   ]
 }
