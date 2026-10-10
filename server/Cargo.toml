@@ -20,7 +20,7 @@ opentelemetry_sdk = "=0.33.0"
 # 継続プロファイリング (Grafana Pyroscope への push)。default の rustls-tls を使う
 pyroscope = { version = "=2.1.1", features = ["backend-pprof-rs"] }
 serde = { version = "=1.0.229", features = ["derive"] }
-tokio = { version = "=1.53.1", features = ["full"] }
+tokio = { version = "=1.53.2", features = ["full"] }
 tower = "=0.5.3"
 tower-http = { version = "=0.7.1", features = ["catch-panic"] }
 tracing = "=0.1.44"
