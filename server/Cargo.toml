@@ -13,7 +13,7 @@ axum-tracing-opentelemetry = "=0.42.1"
 bytes = "=1.12.1"
 envy = "=0.4.2"
 # JSON ログに OTel trace_id を注入する (tracing-subscriber 標準の JSON では出せない)
-json-subscriber = { version = "=0.3.0", features = ["tracing-opentelemetry-0-33"] }
+json-subscriber = { version = "=0.3.1", features = ["tracing-opentelemetry-0-33"] }
 opentelemetry = "=0.33.0"
 opentelemetry-otlp = { version = "=0.33.0", default-features = false, features = ["http-proto", "trace", "reqwest-blocking-client"] }
 opentelemetry_sdk = "=0.33.0"
