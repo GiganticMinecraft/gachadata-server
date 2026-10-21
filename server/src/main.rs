@@ -1,4 +1,5 @@
 mod logging;
+mod metrics;
 mod panic_hook;
 mod shutdown;
 mod telemetry;
@@ -41,7 +42,8 @@ mod domain {
 mod infra_repository_impls {
     use crate::config::MySQL;
     use crate::domain::{GachaDataRepository, GachadataDump, GachadataDumpWithTime};
-    use anyhow::{Context, bail};
+    use crate::metrics::{DumpFailureReason, DumpMetrics};
+    use anyhow::{Context, anyhow};
     use bytes::Bytes;
     use std::ffi::OsString;
     use std::process::Stdio;
@@ -75,6 +77,7 @@ mod infra_repository_impls {
         program_args: Vec<OsString>,
         dump_timeout: Duration,
         retry_interval: Duration,
+        metrics: DumpMetrics,
     }
 
     impl MySQLDumpConnection {
@@ -95,7 +98,17 @@ mod infra_repository_impls {
                 program_args,
                 dump_timeout: DUMP_TIMEOUT,
                 retry_interval: DUMP_RETRY_INTERVAL,
+                metrics: DumpMetrics::new(&crate::metrics::meter()),
             }
+        }
+
+        /// メトリクス用: (最後に dump に成功した時刻, その dump のバイト数)。
+        /// 一度も成功していなければ None
+        pub fn cache_state(&self) -> Option<(SystemTime, usize)> {
+            let cache = self.cache();
+            cache
+                .dump_time
+                .map(|dump_time| (dump_time, cache.dump.0.len()))
         }
 
         fn cache(&self) -> std::sync::MutexGuard<'_, GachadataDumpWithTime> {
@@ -238,21 +251,40 @@ mod infra_repository_impls {
         #[tracing::instrument(skip(self))]
         async fn run_gachadata_dump(&self) -> anyhow::Result<Bytes> {
             let started = Instant::now();
+            let result = self.execute_dump(started).await;
+            match &result {
+                Ok(_) => self.metrics.record_success(started.elapsed()),
+                Err((reason, _)) => self.metrics.record_failure(started.elapsed(), *reason),
+            }
+            result.map_err(|(_, error)| error)
+        }
+
+        /// mariadb-dump を実行して結果を検証する。失敗時はメトリクス用の理由も返す
+        async fn execute_dump(
+            &self,
+            started: Instant,
+        ) -> Result<Bytes, (DumpFailureReason, anyhow::Error)> {
             let output = match tokio::time::timeout(self.dump_timeout, self.spawn_dump()).await {
                 Ok(Ok(output)) => output,
                 Ok(Err(error)) => {
                     tracing::error!(%error, "failed to spawn mariadb-dump");
-                    return Err(error).context("failed to spawn mariadb-dump");
+                    return Err((
+                        DumpFailureReason::Spawn,
+                        anyhow::Error::new(error).context("failed to spawn mariadb-dump"),
+                    ));
                 }
                 Err(_) => {
                     tracing::error!(
                         timeout_secs = self.dump_timeout.as_secs_f64(),
                         "mariadb-dump timed out"
                     );
-                    bail!(
-                        "mariadb-dump timed out after {}s",
-                        self.dump_timeout.as_secs_f64()
-                    );
+                    return Err((
+                        DumpFailureReason::Timeout,
+                        anyhow!(
+                            "mariadb-dump timed out after {}s",
+                            self.dump_timeout.as_secs_f64()
+                        ),
+                    ));
                 }
             };
 
@@ -263,11 +295,17 @@ mod infra_repository_impls {
                     stderr = %stderr,
                     "mariadb-dump exited with failure"
                 );
-                bail!("mariadb-dump exited with {}: {}", output.status, stderr);
+                return Err((
+                    DumpFailureReason::ExitStatus,
+                    anyhow!("mariadb-dump exited with {}: {}", output.status, stderr),
+                ));
             }
             if output.stdout.is_empty() {
                 tracing::error!(stderr = %stderr, "mariadb-dump succeeded but produced no output");
-                bail!("mariadb-dump produced no output: {}", stderr);
+                return Err((
+                    DumpFailureReason::EmptyOutput,
+                    anyhow!("mariadb-dump produced no output: {}", stderr),
+                ));
             }
             if !stderr.is_empty() {
                 tracing::warn!(stderr = %stderr, "mariadb-dump wrote to stderr");
@@ -562,6 +600,37 @@ mod infra_repository_impls {
             assert_eq!(&cached.0[..], b"-- dump\n");
         }
 
+        #[tokio::test]
+        async fn dump_metrics_record_success_and_failure() {
+            use crate::metrics::test_support::*;
+
+            let test_meter = TestMeter::new();
+            let mut ok = fake_connection("echo '-- dump'");
+            ok.metrics = DumpMetrics::new(&test_meter.meter());
+            let mut failing = fake_connection("exit 1");
+            failing.metrics = ok.metrics.clone();
+
+            ok.update_gachadata().await.unwrap();
+            assert!(failing.update_gachadata().await.is_err());
+
+            let exported = test_meter.collect();
+            let failures = find_metric(&exported, "gachadata.dump.failures").unwrap();
+            assert_eq!(u64_sum_total(failures), 1);
+
+            let duration = find_metric(&exported, "gachadata.dump.duration").unwrap();
+            let mut outcomes: Vec<_> = f64_histogram_points(duration)
+                .into_iter()
+                .map(|point| (attribute(point, "outcome").unwrap(), point.count()))
+                .collect();
+            outcomes.sort();
+            assert_eq!(
+                outcomes,
+                [("failure".to_owned(), 1), ("success".to_owned(), 1)]
+            );
+            assert_eq!(ok.cache_state().map(|(_, len)| len), Some(8));
+            assert_eq!(failing.cache_state(), None);
+        }
+
         #[test]
         fn stderr_is_truncated_and_redacted() {
             let connection = MySQLDumpConnection::new(mysql());
@@ -677,8 +746,8 @@ mod config {
 /// SIGTERM 受信後、処理中リクエストの完了を待つ上限。
 /// 本番の終了猶予 (terminationGracePeriodSeconds 40 - preStop sleep 5 = 35s) から、
 /// 後続の flush に必要な時間を残した値。Pyroscope の停止は最大 10s、OTel の flush は
-/// 通常すぐ終わる (exporter のタイムアウトは 10s だが、Pyroscope と同時に最大まで
-/// かかることはまずないので、合計 15s を見込む)
+/// 通常すぐ終わる (exporter のタイムアウトは 10s。スパンとメトリクスは並行して flush する。
+/// Pyroscope と同時に最大までかかることはまずないので、合計 15s を見込む)
 const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 #[tokio::main]
@@ -697,9 +766,12 @@ async fn main() {
     use tower_http::catch_panic::CatchPanicLayer;
     use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
-    // OTel トレーシング (OTLP http/protobuf)。
+    // 起動時刻 (一度も dump に成功していないときの last_success_age の基準)
+    let process_started = std::time::SystemTime::now();
+
+    // OTel トレーシング・メトリクス (OTLP http/protobuf)。
     // OTEL_EXPORTER_OTLP_ENDPOINT 未設定または OTEL_SDK_DISABLED=true なら無効
-    let tracer_provider = telemetry::init_tracer_provider();
+    let otel_providers = telemetry::init_providers();
 
     // stdout ログ: 本番は 1 行 JSON (trace_id 注入付き)、ローカル (ENV_NAME=local) は
     // 人間向けフォーマット。LOG_FORMAT=json|pretty で明示上書き可
@@ -725,8 +797,8 @@ async fn main() {
     };
 
     tracing_subscriber::registry()
-        .with(tracer_provider.as_ref().map(|provider| {
-            tracing_opentelemetry::layer().with_tracer(provider.tracer("gachadata-server"))
+        .with(otel_providers.as_ref().map(|providers| {
+            tracing_opentelemetry::layer().with_tracer(providers.tracer.tracer("gachadata-server"))
         }))
         .with(json_log_layer)
         .with(pretty_log_layer)
@@ -768,6 +840,16 @@ async fn main() {
 
     let mysql_dump_connection = MySQLDumpConnection::new(config.mysql);
 
+    // メトリクス。instrument は init_providers で meter provider を登録した後に作る
+    let meter = metrics::meter();
+    let _dump_cache_gauges = {
+        let connection = mysql_dump_connection.clone();
+        metrics::register_dump_cache_gauges(&meter, process_started, move || {
+            connection.cache_state()
+        })
+    };
+    let http_server_metrics = metrics::HttpServerMetrics::new(&meter);
+
     let router = Router::new()
         .route("/", get(get_gachadata_handler))
         .with_state(mysql_dump_connection)
@@ -777,7 +859,13 @@ async fn main() {
         // レスポンスヘッダーへの trace context 挿入 (OtelAxumLayer より内側に置く)
         .layer(OtelInResponseLayer)
         // リクエストごとの OTel サーバースパン開始
-        .layer(OtelAxumLayer::default());
+        .layer(OtelAxumLayer::default())
+        // http.server.request.duration の記録。CatchPanicLayer より外側に置き、
+        // panic で返した 500 も記録する
+        .layer(axum::middleware::from_fn_with_state(
+            http_server_metrics,
+            metrics::record_http_server_duration,
+        ));
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], config.http_port.port));
 
@@ -822,15 +910,15 @@ async fn main() {
         ),
     }
 
-    // 終了前に未送信のプロファイル・スパンを flush する
+    // 終了前に未送信のプロファイル・スパン・メトリクスを flush する
     if let Some(agent) = pyroscope_agent {
         match agent.stop() {
             Ok(agent) => agent.shutdown(),
             Err(error) => tracing::warn!(%error, "Pyroscope agent の停止に失敗しました"),
         }
     }
-    if let Some(provider) = tracer_provider {
-        let _ = provider.shutdown();
+    if let Some(providers) = otel_providers {
+        providers.shutdown();
     }
     tracing::info!("shutdown complete");
 }
