@@ -47,12 +47,17 @@ mod infra_repository_impls {
     use std::time::{Duration, Instant, SystemTime};
     use tokio::io::AsyncWriteExt;
     use tokio::process::Command;
+    use tracing::Instrument;
 
     /// キャッシュの有効期間。最終 dump の取得からこれ以上経過していれば取り直す
     const DUMP_CACHE_TTL: Duration = Duration::from_secs(900);
 
     /// mariadb-dump 1 回あたりの上限時間。超えたらプロセスを kill して失敗扱いにする
     const DUMP_TIMEOUT: Duration = Duration::from_secs(120);
+
+    /// dump に失敗してから次に再試行するまでの間隔。DB 障害中にリクエストごとに
+    /// mariadb-dump を実行して待たせるのを避ける
+    pub const DUMP_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 
     /// ログ・span に載せる stderr の上限 (バイト)
     const MAX_STDERR_LOG_BYTES: usize = 4096;
@@ -61,28 +66,33 @@ mod infra_repository_impls {
     pub struct MySQLDumpConnection {
         pub connection_information: MySQL,
         dump: Arc<Mutex<GachadataDumpWithTime>>,
-        /// 更新処理の直列化用。中身は直近の dump 試行 (成否問わず) が終わった時刻
+        /// 更新処理の直列化用。中身は直近に dump が失敗した時刻 (成功したら None)
         refresh_lock: Arc<tokio::sync::Mutex<Option<Instant>>>,
         program: OsString,
+        /// program の直後に付ける引数 (テストで mariadb-dump を sh -c に差し替える用)
+        program_args: Vec<OsString>,
         dump_timeout: Duration,
+        retry_interval: Duration,
     }
 
     impl MySQLDumpConnection {
         pub fn new(connection_information: MySQL) -> Self {
-            Self::with_program(connection_information, "mariadb-dump", DUMP_TIMEOUT)
+            Self::with_program(connection_information, "mariadb-dump", Vec::new())
         }
 
         fn with_program(
             connection_information: MySQL,
             program: impl Into<OsString>,
-            dump_timeout: Duration,
+            program_args: Vec<OsString>,
         ) -> Self {
             Self {
                 connection_information,
                 dump: Arc::default(),
                 refresh_lock: Arc::default(),
                 program: program.into(),
-                dump_timeout,
+                program_args,
+                dump_timeout: DUMP_TIMEOUT,
+                retry_interval: DUMP_RETRY_INTERVAL,
             }
         }
 
@@ -114,6 +124,7 @@ mod infra_repository_impls {
 
             let mut command = Command::new(&self.program);
             command
+                .args(&self.program_args)
                 // --defaults-extra-file は先頭の引数でなければならない
                 .arg("--defaults-extra-file=/dev/stdin")
                 .arg("--host")
@@ -160,16 +171,60 @@ mod infra_repository_impls {
             child.wait_with_output().await
         }
 
-        /// stderr をログ用に整形する。上限で切り詰め、念のためパスワードを伏せる
+        /// stderr をログ用に整形する。念のためパスワードを伏せてから上限で切り詰める
+        /// (先に切り詰めると、境界をまたいだパスワードの前半が伏せられずに残る)
         fn sanitize_stderr(&self, stderr: &[u8]) -> String {
-            let truncated = &stderr[..stderr.len().min(MAX_STDERR_LOG_BYTES)];
-            let text = String::from_utf8_lossy(truncated);
-            let text = text.trim();
+            let text = String::from_utf8_lossy(stderr);
             let password = &self.connection_information.password;
-            if password.is_empty() {
-                text.to_owned()
+            let mut text = if password.is_empty() {
+                text.into_owned()
             } else {
                 text.replace(password.as_str(), "<redacted>")
+            };
+            if text.len() > MAX_STDERR_LOG_BYTES {
+                let mut end = MAX_STDERR_LOG_BYTES;
+                while !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                text.truncate(end);
+            }
+            text.trim().to_owned()
+        }
+
+        /// キャッシュが古ければ dump を取り直す。更新処理は refresh_lock で直列化する
+        async fn refresh_if_stale(&self) -> anyhow::Result<()> {
+            let mut last_failure = self.refresh_lock.lock().await;
+
+            // ロック待ちの間に他のリクエストが dump に成功していれば、そのキャッシュを使う
+            if !self.is_cache_stale() {
+                return Ok(());
+            }
+            // 直前に失敗していれば、再試行の間隔が空くまでは dump しない。
+            // ロック待ちの間に他のリクエストが失敗した場合も、待っていた全員で
+            // 失敗する dump を直列に実行し直すのを避けられる
+            if let Some(failed_at) = *last_failure
+                && failed_at.elapsed() < self.retry_interval
+            {
+                bail!(
+                    "skipped mariadb-dump because the previous attempt failed {}s ago",
+                    failed_at.elapsed().as_secs()
+                );
+            }
+
+            match self.run_gachadata_dump().await {
+                Ok(dump) => {
+                    *last_failure = None;
+                    *self.cache() = GachadataDumpWithTime {
+                        dump: GachadataDump(dump),
+                        dump_time: Some(SystemTime::now()),
+                    };
+                    Ok(())
+                }
+                // 失敗時は前回の正常なキャッシュと dump_time をそのまま残す
+                Err(error) => {
+                    *last_failure = Some(Instant::now());
+                    Err(error)
+                }
             }
         }
 
@@ -231,30 +286,16 @@ mod infra_repository_impls {
                 return Ok(());
             }
 
-            let requested_at = Instant::now();
-            let mut last_attempt_finished = self.refresh_lock.lock().await;
-
-            // ロック待ちの間に他のリクエストが dump を試行していれば、その結果を使う。
-            // 成功していればキャッシュが新しくなっており、失敗していれば直後に
-            // 取り直しても同じく失敗する可能性が高いので、待っていた全員で
-            // 再実行するのを避ける (次に来たリクエストで再試行される)
-            if last_attempt_finished.is_some_and(|finished| finished >= requested_at)
-                || !self.is_cache_stale()
-            {
-                return Ok(());
-            }
-
-            let result = self.run_gachadata_dump().await;
-            *last_attempt_finished = Some(Instant::now());
-
-            // 失敗時は前回の正常なキャッシュと dump_time をそのまま残す
-            let dump = result?;
-            *self.cache() = GachadataDumpWithTime {
-                dump: GachadataDump(dump),
-                dump_time: Some(SystemTime::now()),
-            };
-
-            Ok(())
+            // 別タスクで更新する。クライアントの切断などでこの future が drop されても
+            // mariadb-dump が kill されず (kill_on_drop) 最後まで実行され、
+            // 結果がキャッシュされる
+            let connection = self.clone();
+            tokio::spawn(
+                async move { connection.refresh_if_stale().await }
+                    .instrument(tracing::Span::current()),
+            )
+            .await
+            .context("gachadata refresh task failed")?
         }
 
         fn cached_gachadata(&self) -> Option<GachadataDump> {
@@ -266,7 +307,6 @@ mod infra_repository_impls {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use std::os::unix::fs::PermissionsExt;
         use std::path::PathBuf;
 
         fn mysql() -> MySQL {
@@ -278,22 +318,34 @@ mod infra_repository_impls {
             }
         }
 
-        /// テスト用に mariadb-dump の代わりに実行するシェルスクリプトを作る
-        fn script(name: &str, body: &str) -> PathBuf {
+        /// mariadb-dump の代わりに `sh -c <body>` を実行する接続を作る。
+        /// スクリプトファイルを書いて exec すると、並行するテストの fork と競合して
+        /// ETXTBSY になることがあるため、ファイルは使わない
+        fn fake_connection(body: &str) -> MySQLDumpConnection {
+            MySQLDumpConnection::with_program(
+                mysql(),
+                "/bin/sh",
+                vec!["-c".into(), body.into(), "fake-dump".into()],
+            )
+        }
+
+        /// dump の実行回数を数えるファイル
+        fn counter_file(name: &str) -> PathBuf {
             let dir = std::env::temp_dir().join(format!(
                 "gachadata-server-test-{}-{}",
                 std::process::id(),
                 name
             ));
             std::fs::create_dir_all(&dir).unwrap();
-            let path = dir.join("fake-dump");
-            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let path = dir.join("count");
+            let _ = std::fs::remove_file(&path);
             path
         }
 
-        fn connection(program: impl Into<OsString>) -> MySQLDumpConnection {
-            MySQLDumpConnection::with_program(mysql(), program, Duration::from_secs(10))
+        fn run_count(counter: &PathBuf) -> usize {
+            std::fs::read_to_string(counter)
+                .map(|s| s.lines().count())
+                .unwrap_or(0)
         }
 
         fn set_cache(connection: &MySQLDumpConnection, body: &'static str, age: Duration) {
@@ -346,7 +398,7 @@ mod infra_repository_impls {
 
         #[tokio::test]
         async fn successful_dump_is_cached() {
-            let connection = connection(script("ok", "cat; echo '-- dump'"));
+            let connection = fake_connection("cat; echo '-- dump'");
 
             connection.update_gachadata().await.unwrap();
 
@@ -360,7 +412,7 @@ mod infra_repository_impls {
 
         #[tokio::test]
         async fn failure_without_cache_leaves_cache_empty() {
-            let connection = connection(script("fail-empty", "echo 'access denied' >&2; exit 2"));
+            let connection = fake_connection("echo 'access denied' >&2; exit 2");
 
             let error = connection.update_gachadata().await.unwrap_err();
 
@@ -370,7 +422,7 @@ mod infra_repository_impls {
 
         #[tokio::test]
         async fn failure_keeps_previous_cache_and_dump_time() {
-            let connection = connection(script("fail-keep", "echo partial; exit 2"));
+            let connection = fake_connection("echo partial; exit 2");
             set_cache(&connection, "-- previous", DUMP_CACHE_TTL * 2);
             let previous_time = connection.cache().dump_time;
 
@@ -385,7 +437,7 @@ mod infra_repository_impls {
 
         #[tokio::test]
         async fn empty_output_is_failure() {
-            let connection = connection(script("empty", "exit 0"));
+            let connection = fake_connection("exit 0");
             set_cache(&connection, "-- previous", DUMP_CACHE_TTL * 2);
 
             assert!(connection.update_gachadata().await.is_err());
@@ -397,7 +449,7 @@ mod infra_repository_impls {
 
         #[tokio::test]
         async fn timeout_is_failure() {
-            let mut connection = connection(script("timeout", "sleep 10; echo late"));
+            let mut connection = fake_connection("sleep 10; echo late");
             connection.dump_timeout = Duration::from_millis(200);
 
             let error = connection.update_gachadata().await.unwrap_err();
@@ -408,7 +460,8 @@ mod infra_repository_impls {
 
         #[tokio::test]
         async fn spawn_failure_is_failure() {
-            let connection = connection("/nonexistent/mariadb-dump");
+            let connection =
+                MySQLDumpConnection::with_program(mysql(), "/nonexistent/mariadb-dump", vec![]);
 
             assert!(connection.update_gachadata().await.is_err());
             assert!(connection.cached_gachadata().is_none());
@@ -416,63 +469,86 @@ mod infra_repository_impls {
 
         #[tokio::test]
         async fn fresh_cache_is_not_refreshed() {
-            let connection = connection("/nonexistent/mariadb-dump");
+            let connection =
+                MySQLDumpConnection::with_program(mysql(), "/nonexistent/mariadb-dump", vec![]);
             set_cache(&connection, "-- fresh", Duration::from_secs(1));
 
             connection.update_gachadata().await.unwrap();
             assert_eq!(&connection.cached_gachadata().unwrap().0[..], b"-- fresh");
         }
 
-        #[tokio::test]
-        async fn concurrent_requests_run_dump_once() {
-            let counter = script("concurrent", "").with_file_name("count");
-            let program = script(
-                "concurrent",
-                &format!(
-                    "echo x >> '{}'; sleep 0.3; echo '-- dump'",
-                    counter.display()
-                ),
-            );
-            let _ = std::fs::remove_file(&counter);
-            let connection = connection(program);
-
-            let handles: Vec<_> = (0..5)
+        async fn run_concurrently(connection: &MySQLDumpConnection, n: usize) {
+            let handles: Vec<_> = (0..n)
                 .map(|_| {
                     let connection = connection.clone();
                     tokio::spawn(async move { connection.update_gachadata().await })
                 })
                 .collect();
             for handle in handles {
-                handle.await.unwrap().unwrap();
+                // 失敗のケースでは 1 件が dump の失敗、残りは再試行の抑止でエラーになる
+                let _ = handle.await.unwrap();
             }
+        }
 
-            let runs = std::fs::read_to_string(&counter).unwrap().lines().count();
-            assert_eq!(runs, 1);
+        #[tokio::test]
+        async fn concurrent_requests_run_dump_once() {
+            let counter = counter_file("concurrent");
+            let connection = fake_connection(&format!(
+                "echo x >> '{}'; sleep 0.3; echo '-- dump'",
+                counter.display()
+            ));
+
+            run_concurrently(&connection, 5).await;
+
+            assert_eq!(run_count(&counter), 1);
+            assert!(connection.cached_gachadata().is_some());
         }
 
         #[tokio::test]
         async fn concurrent_failures_run_dump_once() {
-            let counter = script("concurrent-fail", "").with_file_name("count");
-            let program = script(
-                "concurrent-fail",
-                &format!("echo x >> '{}'; sleep 0.3; exit 1", counter.display()),
+            let counter = counter_file("concurrent-fail");
+            let connection = fake_connection(&format!(
+                "echo x >> '{}'; sleep 0.3; exit 1",
+                counter.display()
+            ));
+
+            run_concurrently(&connection, 5).await;
+
+            assert_eq!(run_count(&counter), 1);
+            assert!(connection.cached_gachadata().is_none());
+        }
+
+        #[tokio::test]
+        async fn failure_is_retried_after_retry_interval() {
+            let counter = counter_file("retry");
+            let mut connection =
+                fake_connection(&format!("echo x >> '{}'; exit 1", counter.display()));
+            connection.retry_interval = Duration::from_millis(300);
+
+            assert!(connection.update_gachadata().await.is_err());
+            assert!(connection.update_gachadata().await.is_err());
+            assert_eq!(run_count(&counter), 1, "再試行の間隔内は dump しない");
+
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            assert!(connection.update_gachadata().await.is_err());
+            assert_eq!(run_count(&counter), 2, "間隔が空けば再試行する");
+        }
+
+        #[tokio::test]
+        async fn dump_continues_when_request_is_cancelled() {
+            let connection = fake_connection("sleep 0.3; echo '-- dump'");
+
+            // クライアント切断で handler の future が drop される状況を再現する
+            let cancelled =
+                tokio::time::timeout(Duration::from_millis(50), connection.update_gachadata())
+                    .await;
+            assert!(cancelled.is_err());
+
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            assert_eq!(
+                &connection.cached_gachadata().expect("dump must complete").0[..],
+                b"-- dump\n"
             );
-            let _ = std::fs::remove_file(&counter);
-            let connection = connection(program);
-
-            let handles: Vec<_> = (0..5)
-                .map(|_| {
-                    let connection = connection.clone();
-                    tokio::spawn(async move { connection.update_gachadata().await })
-                })
-                .collect();
-            for handle in handles {
-                // 1 件が dump の失敗を返し、待っていた残りは再試行せず Ok を返す
-                let _ = handle.await.unwrap();
-            }
-
-            let runs = std::fs::read_to_string(&counter).unwrap().lines().count();
-            assert_eq!(runs, 1);
         }
 
         #[test]
@@ -487,14 +563,25 @@ mod infra_repository_impls {
             assert!(sanitized.starts_with("error: <redacted> rejected"));
             assert!(sanitized.len() <= MAX_STDERR_LOG_BYTES);
         }
+
+        #[test]
+        fn password_across_truncation_boundary_is_redacted() {
+            let connection = MySQLDumpConnection::new(mysql());
+            let mut stderr = vec![b'a'; MAX_STDERR_LOG_BYTES - 4];
+            stderr.extend_from_slice(b"s3cr3t-pass");
+
+            let sanitized = connection.sanitize_stderr(&stderr);
+
+            assert!(!sanitized.contains("s3cr"));
+        }
     }
 }
 
 mod presentation {
     use crate::domain::GachaDataRepository;
-    use crate::infra_repository_impls::MySQLDumpConnection;
+    use crate::infra_repository_impls::{DUMP_RETRY_INTERVAL, MySQLDumpConnection};
     use axum::extract::State;
-    use axum::http::StatusCode;
+    use axum::http::{StatusCode, header};
     use axum::response::{IntoResponse, Response};
 
     // skip(repository): Debug 経由で MySQL 接続情報とキャッシュ済み dump が
@@ -502,7 +589,7 @@ mod presentation {
     #[tracing::instrument(skip(repository))]
     pub async fn get_gachadata_handler(
         State(repository): State<MySQLDumpConnection>,
-    ) -> Result<impl IntoResponse, (StatusCode, &'static str)> {
+    ) -> Result<impl IntoResponse, impl IntoResponse> {
         if let Err(error) = repository.update_gachadata().await {
             // 詳細は run_gachadata_dump 側でログ・span に記録済み
             tracing::warn!(
@@ -518,8 +605,14 @@ mod presentation {
                 .header("Content-Type", "application/sql")
                 .body(gachadata_dump.0.into_response())
                 .unwrap()),
+            // 起動後まだ一度も dump に成功していない。次に dump を再試行するまでの
+            // 間隔を Retry-After で伝える
             None => Err((
                 StatusCode::SERVICE_UNAVAILABLE,
+                [(
+                    header::RETRY_AFTER,
+                    DUMP_RETRY_INTERVAL.as_secs().to_string(),
+                )],
                 "Gachadata dump is not available yet. \
                 Please retry later or contact administrators.",
             )),
