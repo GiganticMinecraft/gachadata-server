@@ -37,6 +37,8 @@ jobs:
           images: ${{ env.image_name }}
           tags: |
             type=sha,prefix=sha-,suffix=,format=short
+            # seichi_infra のマニフェストは latest@sha256:... で参照し、Renovate が digest の変化を追従する
+            type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build
         id: docker_build
