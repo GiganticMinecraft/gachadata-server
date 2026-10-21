@@ -1,5 +1,6 @@
 mod logging;
 mod panic_hook;
+mod shutdown;
 mod telemetry;
 
 mod domain {
@@ -673,6 +674,13 @@ mod config {
     }
 }
 
+/// SIGTERM 受信後、処理中リクエストの完了を待つ上限。
+/// 本番の終了猶予 (terminationGracePeriodSeconds 40 - preStop sleep 5 = 35s) から、
+/// 後続の flush に必要な時間を残した値。Pyroscope の停止は最大 10s、OTel の flush は
+/// 通常すぐ終わる (exporter のタイムアウトは 10s だが、Pyroscope と同時に最大まで
+/// かかることはまずないので、合計 15s を見込む)
+const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
 #[tokio::main]
 async fn main() {
     use crate::{
@@ -684,6 +692,7 @@ async fn main() {
     use opentelemetry::trace::TracerProvider as _;
     use pyroscope::backend::{BackendConfig, PprofConfig, pprof_backend};
     use pyroscope::pyroscope::PyroscopeAgentBuilder;
+    use std::future::IntoFuture;
     use tokio::net::TcpListener;
     use tower_http::catch_panic::CatchPanicLayer;
     use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
@@ -778,7 +787,8 @@ async fn main() {
 
     // SIGTERM (Kubernetes の Pod 停止) / Ctrl-C で serve を抜け、
     // 下の flush 処理へ到達させる
-    let shutdown_signal = async {
+    let (signal_received_tx, signal_received_rx) = tokio::sync::oneshot::channel::<()>();
+    let shutdown_signal = async move {
         let ctrl_c = async {
             tokio::signal::ctrl_c()
                 .await
@@ -794,13 +804,23 @@ async fn main() {
             () = ctrl_c => {},
             _ = terminate => {},
         }
-        tracing::info!("shutdown signal received");
+        tracing::info!(
+            drain_timeout_secs = DRAIN_TIMEOUT.as_secs(),
+            "shutdown signal received"
+        );
+        let _ = signal_received_tx.send(());
     };
 
-    axum::serve(listener, router)
+    let server = axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal)
-        .await
-        .unwrap();
+        .into_future();
+    match shutdown::serve_with_drain_timeout(server, signal_received_rx, DRAIN_TIMEOUT).await {
+        Some(result) => result.unwrap(),
+        None => tracing::warn!(
+            drain_timeout_secs = DRAIN_TIMEOUT.as_secs(),
+            "drain timed out; abandoning in-flight requests"
+        ),
+    }
 
     // 終了前に未送信のプロファイル・スパンを flush する
     if let Some(agent) = pyroscope_agent {
@@ -812,4 +832,5 @@ async fn main() {
     if let Some(provider) = tracer_provider {
         let _ = provider.shutdown();
     }
+    tracing::info!("shutdown complete");
 }
