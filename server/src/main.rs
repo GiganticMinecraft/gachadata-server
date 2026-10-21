@@ -908,7 +908,13 @@ async fn main() {
         }
     }
     if let Some(providers) = otel_providers {
-        providers.shutdown();
+        let (tracer, meter) = providers.shutdown();
+        if let Err(error) = tracer {
+            tracing::warn!(%error, "failed to shut down tracer provider");
+        }
+        if let Err(error) = meter {
+            tracing::warn!(%error, "failed to shut down meter provider");
+        }
     }
     tracing::info!("shutdown complete");
 }

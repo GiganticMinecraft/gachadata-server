@@ -14,9 +14,11 @@ use std::time::{Duration, Instant, SystemTime};
 
 const METER_NAME: &str = "gachadata-server";
 
-/// OTel semantic conventions の `http.server.request.duration` 推奨バケット (秒)
-const HTTP_DURATION_BOUNDARIES: [f64; 14] = [
-    0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
+/// `http.server.request.duration` のバケット (秒)。OTel semantic conventions の推奨値に、
+/// キャッシュ切れのリクエストが mariadb-dump を待つ分 (最大 DUMP_TIMEOUT = 120s) を足したもの
+const HTTP_DURATION_BOUNDARIES: [f64; 18] = [
+    0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0, 20.0, 30.0,
+    60.0, 120.0,
 ];
 
 /// mariadb-dump の所要時間のバケット (秒)。上限は DUMP_TIMEOUT (120s)
@@ -80,15 +82,19 @@ pub async fn record_http_server_duration(
 
     let response = next.run(request).await;
 
+    let status = response.status();
     let mut attributes = vec![
         KeyValue::new("http.request.method", method),
-        KeyValue::new(
-            "http.response.status_code",
-            i64::from(response.status().as_u16()),
-        ),
+        KeyValue::new("http.response.status_code", i64::from(status.as_u16())),
+        // TLS は手前 (Ingress) で終端しており、このサーバーは http しか受けない
+        KeyValue::new("url.scheme", "http"),
     ];
     if let Some(route) = route {
         attributes.push(KeyValue::new("http.route", route));
+    }
+    // semconv: サーバー側では 5xx をエラーとし、error.type にステータスコードを入れる
+    if status.is_server_error() {
+        attributes.push(KeyValue::new("error.type", status.as_u16().to_string()));
     }
     metrics
         .duration
@@ -158,7 +164,11 @@ impl DumpMetrics {
 }
 
 /// キャッシュ中の dump の状態を収集のたびに返す observable gauge。
-/// 返り値の handle はプロセスの生存期間中保持すること
+/// 返り値の handle はプロセスの生存期間中保持すること。
+///
+/// dump はリクエスト時にキャッシュが古ければ (900s) 取り直すだけで、裏で定期的には
+/// 取り直さない。そのため `gachadata.dump.last_success_age` は「配っている dump の古さ」で、
+/// リクエストが来ない間も増える。dump の失敗そのものは `gachadata.dump.failures` で見ること
 pub fn register_dump_cache_gauges<F>(
     meter: &Meter,
     process_started: SystemTime,
@@ -170,7 +180,7 @@ where
 {
     let size_state = cache_state.clone();
     let size = meter
-        .u64_observable_gauge("gachadata.dump.size_bytes")
+        .u64_observable_gauge("gachadata.dump.size")
         .with_unit("By")
         .with_description("Size of the cached (last successful) gachadata dump.")
         .with_callback(move |observer| {
@@ -181,15 +191,16 @@ where
         .build();
 
     let age = meter
-        .f64_observable_gauge("gachadata.dump.last_success_age_seconds")
+        .f64_observable_gauge("gachadata.dump.last_success_age")
         .with_unit("s")
         .with_description(
-            "Seconds since the last successful mariadb-dump \
-             (since process start if it has never succeeded).",
+            "Seconds since the last successful mariadb-dump, i.e. the age of the served dump \
+             (since process start if it has never succeeded). \
+             Also grows while no requests arrive, since dumps are refreshed on demand.",
         )
         .with_callback(move |observer| {
             // 一度も成功していない場合も起動からの経過で増え続けるようにし、
-            // 「起動後ずっと dump できていない」状態も同じ閾値でアラートできるようにする
+            // 「起動後ずっと dump を配れていない」状態も同じ閾値で検知できるようにする
             let since = cache_state().map_or(process_started, |(dump_time, _)| dump_time);
             // 時計が巻き戻った場合は 0 とする
             let age = since.elapsed().unwrap_or_default();
@@ -305,11 +316,15 @@ mod tests {
     async fn http_duration_has_route_method_and_status() {
         let test_meter = TestMeter::new();
         let metrics = HttpServerMetrics::new(&test_meter.meter());
-        let router = Router::new().route("/", get(|| async { "ok" })).layer(
-            axum::middleware::from_fn_with_state(metrics, record_http_server_duration),
-        );
+        let router = Router::new()
+            .route("/", get(|| async { "ok" }))
+            .route("/boom", get(|| async { StatusCode::INTERNAL_SERVER_ERROR }))
+            .layer(axum::middleware::from_fn_with_state(
+                metrics,
+                record_http_server_duration,
+            ));
 
-        for uri in ["/", "/no-such-path"] {
+        for uri in ["/", "/no-such-path", "/boom"] {
             let response = router
                 .clone()
                 .oneshot(Request::get(uri).body(Body::empty()).unwrap())
@@ -322,7 +337,7 @@ mod tests {
         let metric = find_metric(&exported, "http.server.request.duration")
             .expect("http.server.request.duration must be exported");
         let points = f64_histogram_points(metric);
-        assert_eq!(points.len(), 2);
+        assert_eq!(points.len(), 3);
 
         let ok = points
             .iter()
@@ -331,6 +346,14 @@ mod tests {
         assert_eq!(attribute(ok, "http.route").as_deref(), Some("/"));
         assert_eq!(attribute(ok, "http.request.method").as_deref(), Some("GET"));
         assert_eq!(ok.count(), 1);
+        assert_eq!(attribute(ok, "url.scheme").as_deref(), Some("http"));
+        assert_eq!(attribute(ok, "error.type"), None);
+
+        let error = points
+            .iter()
+            .find(|p| attribute(p, "http.response.status_code").as_deref() == Some("500"))
+            .expect("500 の系列がある");
+        assert_eq!(attribute(error, "error.type").as_deref(), Some("500"));
 
         let not_found = points
             .iter()
@@ -362,11 +385,10 @@ mod tests {
         // 一度も成功していない: size は出さず、age は起動からの経過
         let _never = register_dump_cache_gauges(&meter, started, || None);
         let exported = test_meter.collect();
-        let size = find_metric(&exported, "gachadata.dump.size_bytes").map(u64_gauge_value);
+        let size = find_metric(&exported, "gachadata.dump.size").map(u64_gauge_value);
         assert!(matches!(size, None | Some(None)));
-        let age = f64_gauge_value(
-            find_metric(&exported, "gachadata.dump.last_success_age_seconds").unwrap(),
-        );
+        let age =
+            f64_gauge_value(find_metric(&exported, "gachadata.dump.last_success_age").unwrap());
         assert!((100.0..110.0).contains(&age), "age = {age}");
 
         // 成功済み: size と最終成功からの経過
@@ -377,12 +399,11 @@ mod tests {
         });
         let exported = test_meter.collect();
         assert_eq!(
-            u64_gauge_value(find_metric(&exported, "gachadata.dump.size_bytes").unwrap()),
+            u64_gauge_value(find_metric(&exported, "gachadata.dump.size").unwrap()),
             Some(1234)
         );
-        let age = f64_gauge_value(
-            find_metric(&exported, "gachadata.dump.last_success_age_seconds").unwrap(),
-        );
+        let age =
+            f64_gauge_value(find_metric(&exported, "gachadata.dump.last_success_age").unwrap());
         assert!((5.0..15.0).contains(&age), "age = {age}");
     }
 }

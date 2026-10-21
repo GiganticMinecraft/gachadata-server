@@ -1,5 +1,6 @@
 use opentelemetry::{Key, KeyValue, global};
 use opentelemetry_otlp::{MetricExporter, Protocol, SpanExporter, WithExportConfig};
+use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::{
     Resource, metrics::SdkMeterProvider, propagation::TraceContextPropagator,
     trace::SdkTracerProvider,
@@ -18,22 +19,18 @@ pub struct Providers {
 }
 
 impl Providers {
-    /// 未送信のスパン・メトリクスを flush して停止する。
+    /// 未送信のスパン・メトリクスを flush して停止し、(tracer, meter) それぞれの結果を返す。
     /// それぞれ exporter のタイムアウトまでかかりうるため、並行して待つ
-    pub fn shutdown(self) {
+    pub fn shutdown(self) -> (OTelSdkResult, OTelSdkResult) {
         let Self { tracer, meter } = self;
         std::thread::scope(|scope| {
-            scope.spawn(move || {
-                if let Err(error) = tracer.shutdown() {
-                    tracing::warn!(%error, "failed to shut down tracer provider");
-                }
-            });
-            scope.spawn(move || {
-                if let Err(error) = meter.shutdown() {
-                    tracing::warn!(%error, "failed to shut down meter provider");
-                }
-            });
-        });
+            let tracer = scope.spawn(move || tracer.shutdown());
+            let meter = meter.shutdown();
+            (
+                tracer.join().expect("tracer shutdown thread panicked"),
+                meter,
+            )
+        })
     }
 }
 
@@ -48,22 +45,36 @@ fn service_version(env_value: Option<&str>) -> String {
 /// トレース・メトリクス共通の resource。
 ///
 /// Resource::builder() は OTEL_SERVICE_NAME / OTEL_RESOURCE_ATTRIBUTES を
-/// 自動で読むため、service.name は環境変数未設定時のみデフォルト値を与え、
-/// service.version も OTEL_RESOURCE_ATTRIBUTES で指定されていなければ付与する
+/// 自動で読むため、service.name / service.version はそれらで指定されていない場合だけ
+/// デフォルト値を与える (指定がなければ SDK は service.name を `unknown_service:<exe>` にする)
 fn resource() -> Resource {
     let detected = Resource::builder().build();
-    let mut builder = Resource::builder();
-    if std::env::var("OTEL_SERVICE_NAME").is_err() {
-        builder = builder.with_service_name(SERVICE_NAME);
+    let mut defaults = Vec::new();
+    let service_name_detected = detected
+        .get(&Key::from_static_str("service.name"))
+        .is_some_and(|name| !name.as_str().starts_with("unknown_service"));
+    if !service_name_detected {
+        defaults.push(KeyValue::new("service.name", SERVICE_NAME));
     }
     if detected
         .get(&Key::from_static_str("service.version"))
         .is_none()
     {
         let version = service_version(std::env::var(VERSION_ENV).ok().as_deref());
-        builder = builder.with_attribute(KeyValue::new("service.version", version));
+        defaults.push(KeyValue::new("service.version", version));
     }
-    builder.build()
+    if defaults.is_empty() {
+        return detected;
+    }
+    // 検出をやり直さず、検出済みの属性にデフォルト値を足す
+    Resource::builder_empty()
+        .with_attributes(
+            detected
+                .iter()
+                .map(|(key, value)| KeyValue::new(key.clone(), value.clone())),
+        )
+        .with_attributes(defaults)
+        .build()
 }
 
 /// OpenTelemetry のトレーシングとメトリクスを初期化します。
@@ -156,13 +167,22 @@ mod tests {
         );
 
         unsafe {
-            std::env::set_var("OTEL_RESOURCE_ATTRIBUTES", "service.version=from-attrs");
+            std::env::set_var(
+                "OTEL_RESOURCE_ATTRIBUTES",
+                "service.name=from-attrs-name,service.version=from-attrs",
+            );
         }
         assert_eq!(
             resource_value("service.version").as_deref(),
             Some("from-attrs"),
             "OTEL_RESOURCE_ATTRIBUTES の service.version を優先する"
         );
+        assert_eq!(
+            resource_value("service.name").as_deref(),
+            Some("from-attrs-name"),
+            "OTEL_RESOURCE_ATTRIBUTES の service.name を優先する"
+        );
+
         unsafe {
             std::env::remove_var("OTEL_RESOURCE_ATTRIBUTES");
             std::env::remove_var(VERSION_ENV);
@@ -192,7 +212,9 @@ mod tests {
         );
 
         if let Some(providers) = providers {
-            providers.shutdown();
+            let (tracer, meter) = providers.shutdown();
+            tracer.expect("tracer provider must shut down cleanly");
+            meter.expect("meter provider must shut down cleanly");
         }
         unsafe {
             std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
