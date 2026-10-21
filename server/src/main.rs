@@ -1,5 +1,6 @@
 mod logging;
 mod panic_hook;
+mod shutdown;
 mod telemetry;
 
 mod domain {
@@ -675,7 +676,9 @@ mod config {
 
 /// SIGTERM 受信後、処理中リクエストの完了を待つ上限。
 /// 本番の終了猶予 (terminationGracePeriodSeconds 40 - preStop sleep 5 = 35s) から、
-/// 後続の flush (Pyroscope の停止は最大 10s) に必要な時間を残した値
+/// 後続の flush に必要な時間を残した値。Pyroscope の停止は最大 10s、OTel の flush は
+/// 通常すぐ終わる (exporter のタイムアウトは 10s だが、Pyroscope と同時に最大まで
+/// かかることはまずないので、合計 15s を見込む)
 const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 #[tokio::main]
@@ -811,24 +814,12 @@ async fn main() {
     let server = axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal)
         .into_future();
-    tokio::pin!(server);
-
-    // drain (処理中リクエストの完了待ち) はシグナル受信から DRAIN_TIMEOUT で打ち切る。
-    // 打ち切った場合、main を抜けて runtime が drop される時点で処理中の
-    // リクエストと dump の refresh タスク (tokio::spawn で切り離し済み) も drop され、
-    // mariadb-dump は kill_on_drop で kill される。キャッシュはメモリ上にしかなく、
-    // dump が最後まで成功したときにだけ置き換えるので、中断しても不整合は残らない
-    tokio::select! {
-        result = &mut server => result.unwrap(),
-        Ok(()) = signal_received_rx => {
-            match tokio::time::timeout(DRAIN_TIMEOUT, &mut server).await {
-                Ok(result) => result.unwrap(),
-                Err(_) => tracing::warn!(
-                    drain_timeout_secs = DRAIN_TIMEOUT.as_secs(),
-                    "drain timed out; abandoning in-flight requests"
-                ),
-            }
-        }
+    match shutdown::serve_with_drain_timeout(server, signal_received_rx, DRAIN_TIMEOUT).await {
+        Some(result) => result.unwrap(),
+        None => tracing::warn!(
+            drain_timeout_secs = DRAIN_TIMEOUT.as_secs(),
+            "drain timed out; abandoning in-flight requests"
+        ),
     }
 
     // 終了前に未送信のプロファイル・スパンを flush する
