@@ -1,5 +1,5 @@
 use tracing::Subscriber;
-use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::{EnvFilter, Layer, fmt::MakeWriter, registry::LookupSpan};
 
 /// stdout ログを JSON にするかどうかを判定します。
 ///
@@ -38,6 +38,35 @@ where
         .with_opentelemetry_ids(true)
 }
 
+/// stdout ログのレイヤー (JSON または人間向け) をフィルタ付きで作ります。
+///
+/// `Option<Layer>` で切り替えると、tracing-subscriber の `Option<L>` が
+/// `on_register_dispatch` を中の layer へ転送しないため、json-subscriber が
+/// OTel の context を引けず traceId / spanId が出力されなくなる。
+/// `Box<dyn Layer>` は転送するので、こちらで切り替える
+/// (writer はテストで出力を取り込むための引数で、本番は `std::io::stdout`)
+pub fn stdout_log_layer<S, W>(
+    json: bool,
+    filter: EnvFilter,
+    writer: W,
+) -> Box<dyn Layer<S> + Send + Sync>
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    W: for<'w> MakeWriter<'w> + Send + Sync + 'static,
+{
+    if json {
+        json_log_layer()
+            .with_writer(writer)
+            .with_filter(filter)
+            .boxed()
+    } else {
+        tracing_subscriber::fmt::layer()
+            .with_writer(writer)
+            .with_filter(filter)
+            .boxed()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -49,7 +78,8 @@ mod tests {
     use tracing::info;
     use tracing_subscriber::{fmt::MakeWriter, layer::SubscriberExt};
 
-    use super::{json_log_layer, json_logs_enabled};
+    use super::{json_log_layer, json_logs_enabled, stdout_log_layer};
+    use tracing_subscriber::EnvFilter;
 
     #[test]
     fn json_logs_are_enabled_outside_local_unless_overridden() {
@@ -117,9 +147,16 @@ mod tests {
     fn injects_trace_and_span_id_inside_otel_span() {
         let capture = Capture::default();
         let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder().build();
+        // main と同じ構成 (Option で包んだ OTel layer + stdout_log_layer) で検証する
         let subscriber = tracing_subscriber::registry()
-            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")))
-            .with(json_log_layer().with_writer(capture.clone()));
+            .with(Some(
+                tracing_opentelemetry::layer().with_tracer(provider.tracer("test")),
+            ))
+            .with(stdout_log_layer(
+                true,
+                EnvFilter::new("info"),
+                capture.clone(),
+            ));
 
         tracing::subscriber::with_default(subscriber, || {
             let span = tracing::info_span!("request");

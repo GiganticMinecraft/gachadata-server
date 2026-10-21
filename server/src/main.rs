@@ -764,7 +764,7 @@ async fn main() {
     use std::future::IntoFuture;
     use tokio::net::TcpListener;
     use tower_http::catch_panic::CatchPanicLayer;
-    use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
     // 起動時刻 (一度も dump に成功していないときの last_success_age の基準)
     let process_started = std::time::SystemTime::now();
@@ -775,33 +775,23 @@ async fn main() {
 
     // stdout ログ: 本番は 1 行 JSON (trace_id 注入付き)、ローカル (ENV_NAME=local) は
     // 人間向けフォーマット。LOG_FORMAT=json|pretty で明示上書き可
-    let stdout_log_filter = || {
-        tracing_subscriber::EnvFilter::new(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
-        )
-    };
     let json_logs_enabled = logging::json_logs_enabled(
         std::env::var("ENV_NAME").ok().as_deref(),
         std::env::var("LOG_FORMAT").ok().as_deref(),
     );
-    let (json_log_layer, pretty_log_layer) = if json_logs_enabled {
-        (
-            Some(logging::json_log_layer().with_filter(stdout_log_filter())),
-            None,
-        )
-    } else {
-        (
-            None,
-            Some(tracing_subscriber::fmt::layer().with_filter(stdout_log_filter())),
-        )
-    };
+    let stdout_log_filter = tracing_subscriber::EnvFilter::new(
+        std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
+    );
 
     tracing_subscriber::registry()
         .with(otel_providers.as_ref().map(|providers| {
             tracing_opentelemetry::layer().with_tracer(providers.tracer.tracer("gachadata-server"))
         }))
-        .with(json_log_layer)
-        .with(pretty_log_layer)
+        .with(logging::stdout_log_layer(
+            json_logs_enabled,
+            stdout_log_filter,
+            std::io::stdout,
+        ))
         .init();
     panic_hook::install();
 
