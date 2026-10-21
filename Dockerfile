@@ -34,4 +34,10 @@ RUN ./mariadb_repo_setup \
 RUN apt update -y && apt install -y mariadb-client
 
 COPY --from=build-env --link /app/target/release/gachadata-server /
+
+# OTel の service.version に載せるビルド元の git commit SHA (CI が build-arg で渡す)。
+# 未指定ならアプリ側で Cargo.toml のバージョンにフォールバックする。
+# ビルドキャッシュを無効にしないよう、最終ステージの末尾で宣言する
+ARG GIT_SHA=""
+ENV GACHADATA_VERSION=${GIT_SHA}
 CMD ["./gachadata-server"]

@@ -13,9 +13,9 @@ axum-tracing-opentelemetry = "=0.42.1"
 bytes = "=1.12.1"
 envy = "=0.4.2"
 # JSON ログに OTel trace_id を注入する (tracing-subscriber 標準の JSON では出せない)
-json-subscriber = { version = "=0.3.1", features = ["tracing-opentelemetry-0-33"] }
+json-subscriber = { version = "=0.3.1", features = ["tracing-opentelemetry-0-34"] }
 opentelemetry = "=0.33.1"
-opentelemetry-otlp = { version = "=0.33.1", default-features = false, features = ["http-proto", "trace", "reqwest-blocking-client"] }
+opentelemetry-otlp = { version = "=0.33.1", default-features = false, features = ["http-proto", "trace", "metrics", "reqwest-blocking-client"] }
 opentelemetry_sdk = "=0.33.1"
 # 継続プロファイリング (Grafana Pyroscope への push)。default の rustls-tls を使う
 pyroscope = { version = "=2.1.1", features = ["backend-pprof-rs"] }
@@ -29,3 +29,7 @@ tracing-subscriber = { version = "=0.3.23", features = ["std", "registry", "env-
 
 [dev-dependencies]
 serde_json = "=1.0.154"
+# メトリクスのテスト用 (InMemoryMetricExporter)
+opentelemetry_sdk = { version = "=0.33.1", features = ["testing"] }
+# テストで Router を oneshot で呼ぶ
+tower = { version = "=0.5.3", features = ["util"] }
