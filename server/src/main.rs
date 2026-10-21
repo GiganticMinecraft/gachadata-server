@@ -28,7 +28,8 @@ mod domain {
     #[async_trait::async_trait]
     pub trait GachaDataRepository: Debug + Sync + Send + 'static {
         /// キャッシュが古ければ dump を取り直す。
-        /// 失敗してもキャッシュ (前回の正常な dump) は変更しない
+        /// 失敗してもキャッシュ (前回の正常な dump) は変更しない。
+        /// 直前の失敗から再試行の間隔が空いていなければ、何もせず Ok を返す
         async fn update_gachadata(&self) -> anyhow::Result<()>;
 
         /// 最後に正常に取得できた dump。一度も成功していなければ None
@@ -205,10 +206,13 @@ mod infra_repository_impls {
             if let Some(failed_at) = *last_failure
                 && failed_at.elapsed() < self.retry_interval
             {
-                bail!(
-                    "skipped mariadb-dump because the previous attempt failed {}s ago",
-                    failed_at.elapsed().as_secs()
+                // 失敗そのものは run_gachadata_dump で ERROR として記録済みなので、
+                // ここではリクエストごとに警告を重ねない
+                tracing::debug!(
+                    failed_secs_ago = failed_at.elapsed().as_secs(),
+                    "skipped mariadb-dump because the previous attempt failed recently"
                 );
+                return Ok(());
             }
 
             match self.run_gachadata_dump().await {
@@ -241,7 +245,7 @@ mod infra_repository_impls {
                 }
                 Err(_) => {
                     tracing::error!(
-                        timeout_secs = self.dump_timeout.as_secs(),
+                        timeout_secs = self.dump_timeout.as_secs_f64(),
                         "mariadb-dump timed out"
                     );
                     bail!(
@@ -449,7 +453,7 @@ mod infra_repository_impls {
 
         #[tokio::test]
         async fn timeout_is_failure() {
-            let mut connection = fake_connection("sleep 10; echo late");
+            let mut connection = fake_connection("exec sleep 10");
             connection.dump_timeout = Duration::from_millis(200);
 
             let error = connection.update_gachadata().await.unwrap_err();
@@ -485,7 +489,7 @@ mod infra_repository_impls {
                 })
                 .collect();
             for handle in handles {
-                // 失敗のケースでは 1 件が dump の失敗、残りは再試行の抑止でエラーになる
+                // 失敗のケースでは 1 件が dump の失敗を返し、残りは再試行を抑止して Ok を返す
                 let _ = handle.await.unwrap();
             }
         }
@@ -523,13 +527,14 @@ mod infra_repository_impls {
             let counter = counter_file("retry");
             let mut connection =
                 fake_connection(&format!("echo x >> '{}'; exit 1", counter.display()));
-            connection.retry_interval = Duration::from_millis(300);
+            connection.retry_interval = Duration::from_secs(1);
 
             assert!(connection.update_gachadata().await.is_err());
-            assert!(connection.update_gachadata().await.is_err());
+            assert!(connection.update_gachadata().await.is_ok());
             assert_eq!(run_count(&counter), 1, "再試行の間隔内は dump しない");
+            assert!(connection.cached_gachadata().is_none());
 
-            tokio::time::sleep(Duration::from_millis(400)).await;
+            tokio::time::sleep(Duration::from_millis(1200)).await;
             assert!(connection.update_gachadata().await.is_err());
             assert_eq!(run_count(&counter), 2, "間隔が空けば再試行する");
         }
@@ -544,11 +549,16 @@ mod infra_repository_impls {
                     .await;
             assert!(cancelled.is_err());
 
-            tokio::time::sleep(Duration::from_millis(600)).await;
-            assert_eq!(
-                &connection.cached_gachadata().expect("dump must complete").0[..],
-                b"-- dump\n"
-            );
+            // 遅い CI でも落ちないよう、最大 10 秒までキャッシュが埋まるのを待つ
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let cached = loop {
+                if let Some(cached) = connection.cached_gachadata() {
+                    break cached;
+                }
+                assert!(Instant::now() < deadline, "dump must complete");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            };
+            assert_eq!(&cached.0[..], b"-- dump\n");
         }
 
         #[test]
@@ -591,8 +601,8 @@ mod presentation {
         State(repository): State<MySQLDumpConnection>,
     ) -> Result<impl IntoResponse, impl IntoResponse> {
         if let Err(error) = repository.update_gachadata().await {
-            // 詳細は run_gachadata_dump 側でログ・span に記録済み
-            tracing::warn!(
+            // 失敗の詳細は run_gachadata_dump 側で ERROR としてログ・span に記録済み
+            tracing::debug!(
                 error = format!("{error:#}"),
                 "Failed to update gachadata dump; serving the previous dump if available"
             );
